@@ -2,15 +2,38 @@
 
 Cell Analyzer segments nuclei and cells in microscopy images (`.lif`, `.czi`, `.ome.tif`/`.tif`, `.nd2`) and measures every cell. It then combines the results of all files and makes plots and statistics per condition. All of this runs from one window.
 
-> **Not a Python user? Open [`USER_GUIDE.html`](https://github.com/VascuImmu/cell-analyzer/blob/main/USER_GUIDE.html) in your web browser.** It covers installation, a first analysis step by step, and what every setting means.
+> **Not a Python user? Open `USER_GUIDE.html` in your web browser.** It covers installation, a first analysis step by step, and what every setting means.
+
+## Download
+
+Replace `<USER>/<REPO>` below with this repository's address on GitHub.
+
+**Without git (easiest):**
+
+1. Open the repository page on GitHub: `https://github.com/<USER>/<REPO>`
+2. Click the green **Code** button, then **Download ZIP**.
+3. Unzip the file. The folder is called `<REPO>-main`; you can rename it to `cell-analyzer`.
+4. Move the folder somewhere permanent on your own computer, for example `Documents/cell-analyzer`. Don't keep it on a network drive or in a synced folder, because that can break the start files.
+
+**With git:**
+
+```bash
+git clone https://github.com/<USER>/<REPO>.git cell-analyzer
+cd cell-analyzer
+```
+
+To update later, run `git pull` inside the folder, or download the ZIP again and replace the folder. Then run the installer once more. It only takes a moment when everything is already installed. Your saved settings are kept.
 
 ## Quick start
 
 | | macOS | Windows | Linux |
 |---|---|---|---|
-| 1. Install [Miniforge](https://github.com/conda-forge/miniforge) | once | once | once |
-| 2. Install Cell Analyzer | in Terminal: `bash install_mac.command` | double-click `install_windows.bat` | `bash install_linux.sh` |
-| 3. Start | double-click **Cell Analyzer.app** (or `start_mac.command`) | double-click `start_windows.bat` | `bash start_linux.sh` |
+| 1. Download Cell Analyzer from GitHub (see above) | once | once | once |
+| 2. Install [Miniforge](https://github.com/conda-forge/miniforge) | once | once | once |
+| 3. Install Cell Analyzer | in Terminal: `bash install_mac.command` | double-click `install_windows.bat` | `bash install_linux.sh` |
+| 4. Start | double-click **Cell Analyzer.app** (or `start_mac.command`) | double-click `start_windows.bat` | `bash start_linux.sh` |
+
+On macOS, run the installer from Terminal: type `bash ` (with a space), drag `install_mac.command` into the Terminal window, and press Enter. macOS blocks double-clicking scripts that were downloaded from the internet, and the installer removes that block.
 
 The installer creates a conda environment called `cell-analyzer` from `environment.yml`. Every package comes from conda-forge and none from pip, because pip once replaced numpy 1.x with 2.x underneath scikit-image. The installer then imports every package (`tools/check_env.py`) and rebuilds the environment by itself if something is broken. Add `--fresh` to force a clean rebuild.
 
