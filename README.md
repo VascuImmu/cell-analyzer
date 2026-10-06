@@ -2,7 +2,7 @@
 
 Cell Analyzer segments nuclei and cells in microscopy images (`.lif`, `.czi`, `.ome.tif`/`.tif`, `.nd2`) and measures every cell. It then combines the results of all files and makes plots and statistics per condition. All of this runs from one window.
 
-> **Not a Python user? Open `USER_GUIDE.html` in your web browser.** It covers installation, a first analysis step by step, and what every setting means.
+> **Not a Python user? Open [`USER_GUIDE.html`](https://github.com/VascuImmu/cell-analyzer/blob/main/USER_GUIDE.html) in your web browser.** It covers installation, a first analysis step by step, and what every setting means.
 
 ## Quick start
 
