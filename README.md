@@ -6,13 +6,13 @@ Cell Analyzer segments nuclei and cells in microscopy images (`.lif`, `.czi`, `.
 
 ## Download
 
-Replace `<USER>/<REPO>` below with this repository's address on GitHub.
+Replace `VascuImmu/cell-analyzer` below with this repository's address on GitHub.
 
 **Without git (easiest):**
 
-1. Open the repository page on GitHub: `https://github.com/<USER>/<REPO>`
+1. Open the repository page on GitHub: `https://github.com/VascuImmu/cell-analyzer`
 2. Click the green **Code** button, then **Download ZIP**.
-3. Unzip the file. The folder is called `<REPO>-main`; you can rename it to `cell-analyzer`.
+3. Unzip the file. The folder is called `cell-analyzer-main`; you can rename it to `cell-analyzer`.
 4. Move the folder somewhere permanent on your own computer, for example `Documents/cell-analyzer`. Don't keep it on a network drive or in a synced folder, because that can break the start files.
 
 **With git:**
