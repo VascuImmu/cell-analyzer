@@ -1,0 +1,27 @@
+# Conda environment for Cell Analyzer.
+# Created automatically by install_mac.command / install_windows.bat / install_linux.sh,
+# or by hand with:   conda env create -f environment.yml
+#
+# Everything comes from conda-forge -- NO pip packages. (pip once replaced numpy 1.x with 2.x
+# underneath the conda packages, which breaks scikit-image with
+# "numpy.dtype size changed, may indicate binary incompatibility".)
+name: cell-analyzer
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy>=1.24,<2        # aicsimageio 4.x needs numpy 1.x
+  - scipy
+  - scikit-image>=0.20
+  - pandas
+  - matplotlib
+  - dask
+  - openpyxl
+  - pyarrow
+  - tifffile
+  - aicsimageio=4.14
+  - readlif               # .lif
+  - aicspylibczi>=3.1,<4  # .czi
+  - fsspec
+  - cmap
+  - tk
