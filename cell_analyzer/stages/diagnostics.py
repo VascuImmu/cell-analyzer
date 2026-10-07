@@ -1,5 +1,7 @@
 """
-cell_analyzer/stages/diagnostics.py -- size statistics of the segmented objects (in pixels).
+cell_analyzer/stages/diagnostics.py -- size statistics of the segmented objects.
+
+Values are shown in µm / µm² when the pixel size of the images is known, otherwise in pixels.
 
 Purpose: make educated guesses for the segmentation settings instead of trial and error.
 After segmentation, the per-object tables written by stages/segmentation.py
@@ -21,6 +23,10 @@ Each panel shows the distribution, its median, the CURRENT value of the related 
     min. distance (seeds)  ~ 0.35 x median nucleus diameter  (= 0.7 x radius)
     min. cell size         ~ 1/3 of the median cell area
 
+The two medians "nucleus diameter" and "cell area" are also what belongs into the settings
+"Typical nucleus diameter" and "Typical cell area", from which all automatic sizes follow.
+Without a nuclei channel (junction-only mode) a three-panel figure of the cells is made.
+
 Caveat: nuclei and cells are measured AFTER the current filters, so with badly wrong
 settings the medians are biased -- adjust, re-run on a few scenes, and look again.
 The first panel (all bright objects before the size filter) does not have this bias.
@@ -38,6 +44,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from ..config import output_paths
+from ..sizes import resolve_sizes
 
 NUC, CELL, RAW = "#2a78d6", "#1baf7a", "#9a9892"
 CUR, INK, INK2, GRID = "#e34948", "#1f1f1e", "#52514e", "#e4e3df"
@@ -52,34 +59,83 @@ def load_tables(seg_dir, dataset):
     return out
 
 
+class Units:
+    """Which columns to plot (µm when every table has them, else px) and the current settings in that unit."""
+
+    def __init__(self, t, cfg):
+        ps = []
+        for df in t.values():
+            if len(df) and "pixel_size_um" in df:
+                ps.append(df["pixel_size_um"])
+        ps = pd.concat(ps) if ps else pd.Series(dtype=float)
+        self.um = bool(len(ps)) and bool(ps.notna().all())
+        self.pixel_size = float(ps.median()) if len(ps) and ps.notna().any() else None
+        self.mixed = self.um and ps.nunique() > 1
+        self.L, self.A = ("µm", "µm²") if self.um else ("px", "px")
+        self.cur, self.auto = {}, {}
+        try:
+            _, report = resolve_sizes(cfg, self.pixel_size)
+            for r in report:
+                if r["kind"] == "count":
+                    continue
+                self.cur[r["key"]] = r["value_um"] if self.um else r["value_px"]
+                self.auto[r["key"]] = r["source"] == "auto"
+        except Exception:
+            for k in ("min_nucleus_size", "min_distance", "min_label_size", "max_cell_area", "multinuc_max_distance"):
+                self.cur[k] = cfg.get(k)
+
+    def col(self, name):
+        if not self.um:
+            return name
+        return "area_um2" if name == "area_px" else name[:-3] + "_um"
+
+    def fmt(self, v, digits=None):
+        if v is None or not np.isfinite(v):
+            return "?"
+        return (f"{v:.0f}" if abs(v) >= 100 else f"{v:.3g}") if self.um else f"{v:.0f}"
+
+    def setting(self, key):
+        v = self.cur.get(key)
+        return None if v is None else float(v)
+
+    def tag(self, key):
+        return " (auto)" if self.auto.get(key) else ""
+
+
 def _med(df, col):
     return float(df[col].median()) if len(df) and col in df else np.nan
 
 
-def suggestions(t):
-    """Suggested starting values from the measured medians (NaN when there is no data)."""
-    nuc_area, nuc_diam, cell_area = _med(t["nuclei"], "area_px"), _med(t["nuclei"], "equivalent_diameter_px"), \
-        _med(t["cells"], "area_px")
+def suggestions(t, u):
+    """Suggested starting values from the measured medians, in the plotted unit (NaN without data)."""
+    nuc_area, nuc_diam, cell_area = _med(t["nuclei"], u.col("area_px")), _med(t["nuclei"], u.col("equivalent_diameter_px")), \
+        _med(t["cells"], u.col("area_px"))
 
     def rnd(v, base):
-        return int(max(base, round(v / base) * base)) if np.isfinite(v) else np.nan
+        if not np.isfinite(v):
+            return np.nan
+        if u.um:
+            return float(f"{v:.2g}")
+        return int(max(base, round(v / base) * base))
 
     return dict(
         min_nucleus_size=rnd(nuc_area / 3, 10),
         min_distance=rnd(0.35 * nuc_diam, 1),
         min_label_size=rnd(cell_area / 3, 50),
-        multinuc_max_distance_auto=rnd(2 * nuc_diam, 1),
+        typical_nucleus_diameter=rnd(nuc_diam, 1),
+        typical_cell_area=rnd(cell_area, 50),
     )
 
 
 def summary_rows(t, dataset, cfg):
+    u = Units(t, cfg)
     rows = []
-    for key, cols in (("nuclei", ["area_px", "equivalent_diameter_px", "major_axis_px", "minor_axis_px",
-                                  "eccentricity", "nearest_neighbour_px"]),
-                      ("cells", ["area_px", "equivalent_diameter_px", "major_axis_px", "minor_axis_px",
-                                 "eccentricity", "n_nuclei"]),
-                      ("raw", ["area_px"])):
+    base = {"nuclei": ["area_px", "equivalent_diameter_px", "major_axis_px", "minor_axis_px", "nearest_neighbour_px"],
+            "cells": ["area_px", "equivalent_diameter_px", "major_axis_px", "minor_axis_px"], "raw": ["area_px"]}
+    extra = {"nuclei": ["eccentricity"], "cells": ["eccentricity", "n_nuclei"], "raw": []}
+    for key in ("nuclei", "cells", "raw"):
         df = t[key]
+        cols = base[key] + ([u.col(c) for c in base[key]] if u.um else []) + extra[key]
         for c in cols:
             if not len(df) or c not in df:
                 continue
@@ -89,12 +145,19 @@ def summary_rows(t, dataset, cfg):
             p5, p25, p50, p75, p95 = np.percentile(v, [5, 25, 50, 75, 95])
             rows.append(dict(dataset=dataset, object={"raw": "raw objects (before size filter)"}.get(key, key),
                              measure=c, n=len(v), median=p50, p5=p5, p25=p25, p75=p75, p95=p95, mean=v.mean()))
-    s = suggestions(t)
-    for k, label in (("min_nucleus_size", "Min. nucleus size (px)"), ("min_distance", "Min. distance between nucleus seeds (px)"),
-                     ("min_label_size", "Min. cell size (px)")):
-        rows.append(dict(dataset=dataset, object="SUGGESTION", measure=label, n=np.nan, median=s[k],
-                         current_setting=cfg.get(k)))
-    if len(t["cells"]) and "n_nuclei" in t["cells"]:
+    s = suggestions(t, u)
+    for k, label, unit in (("min_nucleus_size", "Min. nucleus size", u.A), ("min_distance", "Min. distance between nucleus seeds", u.L),
+                           ("min_label_size", "Min. cell size", u.A)):
+        if np.isfinite(s[k]):
+            rows.append(dict(dataset=dataset, object="SUGGESTION", measure=f"{label} ({unit})", n=np.nan, median=s[k],
+                             current_setting=u.setting(k)))
+    if u.um:
+        for k, key, label in (("typical_nucleus_diameter", "typical_nucleus_diameter_um", "Typical nucleus diameter (µm)"),
+                              ("typical_cell_area", "typical_cell_area_um2", "Typical cell area (µm²)")):
+            if np.isfinite(s[k]):
+                rows.append(dict(dataset=dataset, object="SUGGESTION", measure=label, n=np.nan, median=s[k],
+                                 current_setting=cfg.get(key)))
+    if len(t["cells"]) and "n_nuclei" in t["cells"] and t["cells"]["n_nuclei"].notna().any():
         rows.append(dict(dataset=dataset, object="cells", measure="fraction multi-nucleated",
                          n=len(t["cells"]), median=float((t["cells"]["n_nuclei"] > 1).mean())))
     return rows
@@ -149,53 +212,123 @@ def _vline(ax, x, kind, text, rng=None):
     ax.plot([], [], label=text + ("  (outside the plotted range)" if outside else ""), **style)
 
 
+def _footer(fig, u, counts, title):
+    fig.suptitle(f"Size statistics · {title}", x=0.01, ha="left", fontsize=13, color=INK)
+    unit = (f"all values in µm / µm² (pixel size {u.pixel_size:.3g} µm" + (", median of several" if u.mixed else "") + ")") \
+        if u.um else "all values in pixels (no pixel size known)"
+    fig.text(0.01, 0.945, f"{counts} · {unit}   |   red dashed = current setting, black dotted = suggested "
+             f"starting value, solid = median", fontsize=9, color=INK2)
+
+
+def make_cells_figure(t, cfg, title, save_path, dpi=120):
+    """Junction-only mode: no nuclei, three panels about the cells."""
+    cells = t["cells"]
+    u = Units(t, cfg)
+    s = suggestions(t, u)
+    fig, ax = plt.subplots(1, 3, figsize=(15, 4.9))
+
+    def g(col):
+        return cells[col].to_numpy() if len(cells) and col in cells else np.array([])
+
+    ca = u.col("area_px")
+    lo, hi, typ = u.setting("min_label_size"), u.setting("max_cell_area"), None
+    if u.um:
+        typ = float(cfg.get("typical_cell_area_um2") or 1000.0)
+    r = _hist(ax[0], g(ca), CELL, "Cell area", f"area ({u.A})", include=[lo, hi, typ])
+    _vline(ax[0], _med(cells, ca), "median", f"median = {u.fmt(_med(cells, ca))}", r)
+    _vline(ax[0], lo, "current", f"current min. cell size = {u.fmt(lo)}{u.tag('min_label_size')}", r)
+    _vline(ax[0], hi, "current", f"current max. cell size after merging = {u.fmt(hi)}{u.tag('max_cell_area')}", r)
+    if typ:
+        _vline(ax[0], typ, "info", f"'Typical cell area' setting = {u.fmt(typ)}", r)
+
+    r = _hist(ax[1], g(u.col("major_axis_px")), CELL, "Cell length and width\n(axes of the fitted ellipse)", f"length ({u.L})")
+    v = g(u.col("minor_axis_px"))
+    v = v[np.isfinite(v)]
+    if r is not None and len(v):
+        ax[1].hist(v, bins=np.linspace(min(r[0], v.min()), r[1], 51), color=NUC, alpha=0.55, edgecolor="white", linewidth=0.4)
+        ax[1].plot([], [], color=CELL, lw=6, alpha=0.75, label=f"long axis, median = {u.fmt(_med(cells, u.col('major_axis_px')))}")
+        ax[1].plot([], [], color=NUC, lw=6, alpha=0.55, label=f"short axis, median = {u.fmt(float(np.median(v)))}")
+        ax[1].autoscale(axis="x")
+        ax[1].set_ylim(0, ax[1].get_ylim()[1] * 1.15)
+
+    r = _hist(ax[2], g("eccentricity"), CELL, "Cell eccentricity\n(0 = round, 1 = elongated)", "eccentricity")
+    _vline(ax[2], _med(cells, "eccentricity"), "median", f"median = {_med(cells, 'eccentricity'):.2f}", r)
+    for x in ax:
+        if x.get_legend_handles_labels()[0]:
+            x.legend(fontsize=7.5, frameon=True, facecolor="white", framealpha=0.85, edgecolor="none",
+                     loc="upper left", handlelength=2.6, borderaxespad=0.2)
+    _footer(fig, u, f"{len(cells):,} cells · seeds from junctions (no nuclei channel)", title)
+    fig.text(0.01, 0.012, "Median far from the 'Typical cell area' setting? Enter the median there – all automatic sizes follow it.  "
+             "Many cells near the maximum = merged neighbours: raise 'Junction needed between two cells'.",
+             fontsize=8, color=INK2)
+    fig.tight_layout(rect=(0, 0.04, 1, 0.9))
+    for txt in fig.texts[1:2]:
+        txt.set_y(0.9)
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=dpi)
+    plt.close(fig)
+    return s
+
+
 def make_figure(t, cfg, title, save_path, dpi=120):
     nuc, cells, raw = t["nuclei"], t["cells"], t["raw"]
-    s = suggestions(t)
+    if not len(nuc):
+        return make_cells_figure(t, cfg, title, save_path, dpi)
+    u = Units(t, cfg)
+    s = suggestions(t, u)
+    f = u.fmt
     fig, axes = plt.subplots(2, 4, figsize=(19, 8.6))
     ax = axes.ravel()
 
     def g(df, col):
         return df[col].to_numpy() if len(df) and col in df else np.array([])
 
+    A, D, NN = u.col("area_px"), u.col("equivalent_diameter_px"), u.col("nearest_neighbour_px")
+    mns, mds, mls = u.setting("min_nucleus_size"), u.setting("min_distance"), u.setting("min_label_size")
+
     # 1 raw objects
-    r = _hist(ax[0], g(raw, "area_px"), RAW, "All bright objects in the nuclei channel\n(before the size filter)",
-              "area (px, log scale)\nleft = debris, right = nuclei: the threshold belongs in the gap", log=True,
-              include=[cfg["min_nucleus_size"], s["min_nucleus_size"]])
-    _vline(ax[0], cfg["min_nucleus_size"], "current", f"current min. nucleus size = {cfg['min_nucleus_size']}", r)
-    _vline(ax[0], s["min_nucleus_size"], "suggested", f"suggested ≈ {s['min_nucleus_size']}", r)
+    r = _hist(ax[0], g(raw, A), RAW, "All bright objects in the nuclei channel\n(before the size filter)",
+              f"area ({u.A}, log scale)\nleft = debris, right = nuclei: the threshold belongs in the gap", log=True,
+              include=[mns, s["min_nucleus_size"]])
+    _vline(ax[0], mns, "current", f"current min. nucleus size = {f(mns)}{u.tag('min_nucleus_size')}", r)
+    _vline(ax[0], s["min_nucleus_size"], "suggested", f"suggested ≈ {f(s['min_nucleus_size'])}", r)
 
     # 2 nucleus area
-    r = _hist(ax[1], g(nuc, "area_px"), NUC, "Nucleus area", "area (px)",
-              include=[cfg["min_nucleus_size"], s["min_nucleus_size"]])
-    _vline(ax[1], _med(nuc, "area_px"), "median", f"median = {_med(nuc, 'area_px'):.0f}", r)
-    _vline(ax[1], cfg["min_nucleus_size"], "current", f"current min. nucleus size = {cfg['min_nucleus_size']}", r)
-    _vline(ax[1], s["min_nucleus_size"], "suggested", f"suggested ≈ {s['min_nucleus_size']}  (median ÷ 3)", r)
+    r = _hist(ax[1], g(nuc, A), NUC, "Nucleus area", f"area ({u.A})", include=[mns, s["min_nucleus_size"]])
+    _vline(ax[1], _med(nuc, A), "median", f"median = {f(_med(nuc, A))}", r)
+    _vline(ax[1], mns, "current", f"current min. nucleus size = {f(mns)}{u.tag('min_nucleus_size')}", r)
+    _vline(ax[1], s["min_nucleus_size"], "suggested", f"suggested ≈ {f(s['min_nucleus_size'])}  (median ÷ 3)", r)
 
     # 3 nucleus diameter
-    r = _hist(ax[2], g(nuc, "equivalent_diameter_px"), NUC, "Nucleus diameter\n(of a circle with the same area)", "diameter (px)")
-    _vline(ax[2], _med(nuc, "equivalent_diameter_px"), "median", f"median = {_med(nuc, 'equivalent_diameter_px'):.1f}", r)
+    typ_d = float(cfg.get("typical_nucleus_diameter_um") or 10.0) if u.um else None
+    r = _hist(ax[2], g(nuc, D), NUC, "Nucleus diameter\n(of a circle with the same area)", f"diameter ({u.L})",
+              include=[typ_d])
+    _vline(ax[2], _med(nuc, D), "median", f"median = {_med(nuc, D):.1f}", r)
+    if typ_d:
+        _vline(ax[2], typ_d, "info", f"'Typical nucleus diameter' setting = {typ_d:g}", r)
 
     # 4 nearest neighbour
-    md = (cfg["multinuc_max_distance"] or s["multinuc_max_distance_auto"]) if cfg.get("merge_multinucleated") else None
-    r = _hist(ax[3], g(nuc, "nearest_neighbour_px"), NUC, "Distance to the nearest nucleus\n(centre to centre)", "distance (px)",
-              include=[cfg["min_distance"], s["min_distance"], md])
-    _vline(ax[3], _med(nuc, "nearest_neighbour_px"), "median", f"median = {_med(nuc, 'nearest_neighbour_px'):.1f}", r)
-    _vline(ax[3], cfg["min_distance"], "current", f"current min. seed distance = {cfg['min_distance']}", r)
-    _vline(ax[3], s["min_distance"], "suggested", f"suggested ≈ {s['min_distance']}  (0.35 × diameter)", r)
+    md = u.setting("multinuc_max_distance") if cfg.get("merge_multinucleated") else None
+    r = _hist(ax[3], g(nuc, NN), NUC, "Distance to the nearest nucleus\n(centre to centre)", f"distance ({u.L})",
+              include=[mds, s["min_distance"], md])
+    _vline(ax[3], _med(nuc, NN), "median", f"median = {_med(nuc, NN):.1f}", r)
+    _vline(ax[3], mds, "current", f"current min. seed distance = {f(mds)}{u.tag('min_distance')}", r)
+    _vline(ax[3], s["min_distance"], "suggested", f"suggested ≈ {f(s['min_distance'])}  (0.35 × diameter)", r)
     if md:
-        _vline(ax[3], md, "info", f"multi-nucleated: nuclei closer than {md}" + ("" if cfg["multinuc_max_distance"] else " (auto)"), r)
+        _vline(ax[3], md, "info", f"multi-nucleated: nuclei closer than {f(md)}{u.tag('multinuc_max_distance')}", r)
 
     # 5 nucleus eccentricity
     r = _hist(ax[4], g(nuc, "eccentricity"), NUC, "Nucleus eccentricity\n(0 = round, 1 = elongated)", "eccentricity")
     _vline(ax[4], _med(nuc, "eccentricity"), "median", f"median = {_med(nuc, 'eccentricity'):.2f}", r)
 
     # 6 cell area
-    r = _hist(ax[5], g(cells, "area_px"), CELL, "Cell area", "area (px)",
-              include=[cfg["min_label_size"], s["min_label_size"]])
-    _vline(ax[5], _med(cells, "area_px"), "median", f"median = {_med(cells, 'area_px'):.0f}", r)
-    _vline(ax[5], cfg["min_label_size"], "current", f"current min. cell size = {cfg['min_label_size']}", r)
-    _vline(ax[5], s["min_label_size"], "suggested", f"suggested ≈ {s['min_label_size']}  (median ÷ 3)", r)
+    typ_a = float(cfg.get("typical_cell_area_um2") or 1000.0) if u.um else None
+    r = _hist(ax[5], g(cells, A), CELL, "Cell area", f"area ({u.A})", include=[mls, s["min_label_size"], typ_a])
+    _vline(ax[5], _med(cells, A), "median", f"median = {f(_med(cells, A))}", r)
+    _vline(ax[5], mls, "current", f"current min. cell size = {f(mls)}{u.tag('min_label_size')}", r)
+    _vline(ax[5], s["min_label_size"], "suggested", f"suggested ≈ {f(s['min_label_size'])}  (median ÷ 3)", r)
+    if typ_a:
+        _vline(ax[5], typ_a, "info", f"'Typical cell area' setting = {typ_a:g}", r)
 
     # 7 cell eccentricity
     r = _hist(ax[6], g(cells, "eccentricity"), CELL, "Cell eccentricity\n(0 = round, 1 = elongated)", "eccentricity")
@@ -209,6 +342,7 @@ def make_figure(t, cfg, title, save_path, dpi=120):
     a.set_axisbelow(True)
     a.tick_params(labelsize=8, colors=INK2)
     nn = g(cells, "n_nuclei")
+    nn = nn[np.isfinite(nn.astype(float))] if len(nn) else nn
     if len(nn):
         ks = list(range(1, int(max(3, nn.max())) + 1))
         counts = [int((nn == k).sum()) for k in ks]
@@ -234,10 +368,7 @@ def make_figure(t, cfg, title, save_path, dpi=120):
         n_scenes = len(nuc[["dataset", "scene"]].drop_duplicates()) if "dataset" in nuc else nuc["scene"].nunique()
     else:
         n_scenes = 0
-    fig.suptitle(f"Size statistics · {title}", x=0.01, ha="left", fontsize=13, color=INK)
-    fig.text(0.01, 0.945, f"{len(nuc):,} nuclei · {len(cells):,} cells · {n_scenes} scene(s) · all values in pixels   |   "
-             f"red dashed = current setting, black dotted = suggested starting value, solid = median",
-             fontsize=9, color=INK2)
+    _footer(fig, u, f"{len(nuc):,} nuclei · {len(cells):,} cells · {n_scenes} scene(s)", title)
     fig.text(0.01, 0.008, "Nuclei and cells are measured AFTER the current filters – if a setting is far off, the medians are biased: "
              "adjust, re-run a few scenes, look again.  Blue = nuclei, green = cells, grey = unfiltered objects.",
              fontsize=8, color=INK2)
@@ -261,7 +392,7 @@ def run_size_statistics(cfg, dataset_stems=None):
     rows, n_fig, sugg = [], 0, {}
     for stem in stems:
         t = load_tables(root / stem / cfg["segmentation_subdir"], stem)
-        if not len(t["nuclei"]):
+        if not len(t["nuclei"]) and not len(t["cells"]):
             continue
         for k in pooled:
             if len(t[k]):
@@ -273,26 +404,37 @@ def run_size_statistics(cfg, dataset_stems=None):
             print(f"  ✗ size statistics for {stem} failed: {type(e).__name__}: {e}")
             plt.close("all")
         rows += summary_rows(t, stem, cfg)
-    if not any(pooled.values()) or not pooled["nuclei"]:
+    if not pooled["nuclei"] and not pooled["cells"]:
         print("  ↷ no object statistics found (run the segmentation stage first)")
         return dict(n_figures=0, errors=[])
 
     allt = {k: (pd.concat(v, ignore_index=True) if v else pd.DataFrame()) for k, v in pooled.items()}
     out_dir.mkdir(parents=True, exist_ok=True)
-    sugg = make_figure(allt, cfg, f"all files ({len(pooled['nuclei'])})", out_dir / "all_files_size_statistics.png", 130)
+    n_files = max(len(pooled["nuclei"]), len(pooled["cells"]))
+    sugg = make_figure(allt, cfg, f"all files ({n_files})", out_dir / "all_files_size_statistics.png", 130)
     n_fig += 1
     rows = summary_rows(allt, "ALL FILES", cfg) + rows
     pd.DataFrame(rows).round(3).to_csv(out_dir / "size_statistics_summary.csv", index=False)
 
+    u = Units(allt, cfg)
     print(f"  ✓ size statistics: {out_dir / 'all_files_size_statistics.png'}")
-    print(f"    median nucleus area {_med(allt['nuclei'], 'area_px'):.0f} px, diameter "
-          f"{_med(allt['nuclei'], 'equivalent_diameter_px'):.1f} px; median cell area {_med(allt['cells'], 'area_px'):.0f} px")
-    for k, label in (("min_nucleus_size", "Min. nucleus size"), ("min_distance", "Min. distance between nucleus seeds"),
-                     ("min_label_size", "Min. cell size")):
+    if len(allt["nuclei"]):
+        print(f"    median nucleus area {u.fmt(_med(allt['nuclei'], u.col('area_px')))} {u.A}, diameter "
+              f"{_med(allt['nuclei'], u.col('equivalent_diameter_px')):.1f} {u.L}")
+    print(f"    median cell area {u.fmt(_med(allt['cells'], u.col('area_px')))} {u.A}")
+    if u.um:
+        d, a = sugg["typical_nucleus_diameter"], sugg["typical_cell_area"]
+        if np.isfinite(d):
+            print(f"    'Typical nucleus diameter': set to {cfg.get('typical_nucleus_diameter_um')} µm, measured median {d:g} µm")
+        if np.isfinite(a):
+            print(f"    'Typical cell area': set to {cfg.get('typical_cell_area_um2')} µm², measured median {a:g} µm²")
+    for k, label, unit in (("min_nucleus_size", "Min. nucleus size", u.A), ("min_distance", "Min. distance between nucleus seeds", u.L),
+                           ("min_label_size", "Min. cell size", u.A)):
         if np.isfinite(sugg[k]):
-            print(f"    {label}: current {cfg[k]}, suggested starting value ≈ {sugg[k]}")
-    if len(allt["cells"]) and "n_nuclei" in allt["cells"]:
-        print(f"    multi-nucleated cells: {100 * (allt['cells']['n_nuclei'] > 1).mean():.1f} %")
+            print(f"    {label}: current {u.fmt(u.setting(k))} {unit}{u.tag(k)}, suggested starting value ≈ {u.fmt(sugg[k])} {unit}")
+    nn = allt["cells"]["n_nuclei"] if len(allt["cells"]) and "n_nuclei" in allt["cells"] else pd.Series(dtype=float)
+    if nn.notna().any():
+        print(f"    multi-nucleated cells: {100 * (nn > 1).mean():.1f} %")
     return dict(n_figures=n_fig, output_dir=str(out_dir),
                 suggestions={k: (None if not np.isfinite(v) else v) for k, v in sugg.items()}, errors=[])
 

@@ -62,11 +62,12 @@ cell-analyzer/
     ├── gui.py                the window (built automatically from config.py)
     ├── config.py             EVERY parameter: default, label, help text, validation; output layout
     ├── pipeline.py           runs the stages in order, writes the analysis log; command line
-    ├── io_utils.py           finding files, name filters, scenes, image loading, well parsing
+    ├── io_utils.py           finding files, name filters, scenes, image loading, pixel size, well parsing
+    ├── sizes.py              µm settings → pixels per image; automatic values from the typical nucleus and cell size
     └── stages/
         ├── background.py     1  flatfield / background estimation
         ├── flatfield.py         applies a background field
-        ├── segmentation.py   2  nuclei + cell watershed, confluence decision, multi-nucleated cells, QC plots
+        ├── segmentation.py   2  nuclei + cell watershed (or junction-only seeding), multi-nucleated cells, adjacency, QC plots
         ├── diagnostics.py       size statistics of nuclei and cells, suggested settings
         ├── measurement.py    3  per-cell shape, intensity and junction measurements
         ├── aggregation.py    4  one combined table, plate map, Z-scores
@@ -80,10 +81,11 @@ cell-analyzer/
 ├── results/                                  start here
 │   ├── aggregated_cell_measurements.csv      every cell of every file (stage 4)
 │   ├── plots/                                stage 5: index.html, by_<group>/…, plate_heatmaps/
-│   └── size_statistics/                      sizes of nuclei and cells (px), suggested settings
+│   └── size_statistics/                      sizes of nuclei and cells (µm), suggested settings
 ├── per_file/<dataset>/                       one folder per input file
 │   ├── analysis_parameters.json
 │   ├── segmentation_qc/  segmentation/  measurements/  background/
+│   └── adjacency/                            which cells touch: <dataset>_cell_adjacency.csv, <scene>_adjacency_matrix.npz
 ├── pooled_background/                        background mode "pooled"
 └── logs/                                     analysis_log_<time>.json / .txt / _console.txt
 ```
@@ -97,7 +99,7 @@ conda activate cell-analyzer
 cd path/to/cell-analyzer
 python -m cell_analyzer                                            # the window
 python -m cell_analyzer.pipeline --config settings.json            # run without the window
-python -m cell_analyzer.pipeline --input /data/plate.lif --output /data/out --set n_workers=4 min_distance=15
+python -m cell_analyzer.pipeline --input /data/plate.lif --output /data/out --set n_workers=4 typical_cell_area_um2=1500
 python -m cell_analyzer.pipeline --input /data/czi_folder --output /data/out   # asks for format + filters
 python -m cell_analyzer.stages.analysis results/aggregated_cell_measurements.csv results/plots --group-by Treatment
 ```
@@ -108,16 +110,18 @@ python -m cell_analyzer.stages.analysis results/aggregated_cell_measurements.csv
 
 1. **Background** (optional). Averages many scenes into an illumination field. It can be made per file, pooled across all files, or loaded from existing `.npy` files.
 2. **Segmentation.**
-   - The nuclei channel goes through Otsu thresholding, then a distance transform, then a watershed that splits touching nuclei.
-   - Cells are then grown from the nuclei over the edge channel, using its gradient or its intensity.
+   - Size settings are in µm / µm². Settings left empty are derived from the typical nucleus diameter (10 µm) and the typical cell area (1000 µm²) and converted to pixels with each image's pixel size (`sizes.py`). The values used are printed in the Run log and saved in `segmentation_summary.csv` (`used_*_px`).
+   - With a nuclei channel: Otsu thresholding, distance transform, and a watershed that splits touching nuclei. Cells are then grown from the nuclei over the smoothed junction image.
+   - Without a nuclei channel (`seed_source = junctions`): the junction image is blurred, its dark basins (h-minima) seed the watershed, and neighbouring regions are merged when the boundary between them carries no junction signal. This needs confluent cells with nearly complete junctions.
    - Cells with two nuclei are kept together. Two neighbouring cells are merged when their nuclei are close and the boundary between them has no junction signal, compared with a typical boundary in the same image. Merged cells are marked in cyan in the QC pictures.
-   - Size statistics are plotted after segmentation: nucleus and cell area, diameter, eccentricity, distance between nuclei and nuclei per cell, all in pixels, with the current thresholds and suggested starting values drawn in.
+   - Adjacency: every pair of cells that share a boundary (4-connected contact of the labels, not centroid distance), with contact length and mean junction intensity.
+   - Size statistics are plotted after segmentation: nucleus and cell area, diameter, eccentricity, distance between nuclei and nuclei per cell, in µm, with the current thresholds, the typical sizes and suggested values drawn in.
    - Scenes below the confluence threshold are masked to the tissue area if non-confluent analysis is on. Otherwise they are treated as confluent or skipped. The decision for each scene is saved in `segmentation_summary.csv`.
 3. **Measurement.**
    - Shape: area, axes, orientation, solidity, ruggedness and more.
    - Per-channel intensity in the cell and in the nucleus.
    - Intensity in a ring along the cell boundary, for the junction channels.
-   - `n_nuclei`, the number of nuclei in the cell.
+   - `n_nuclei`, the number of nuclei in the cell; `n_neighbours` and `neighbour_contact_um` from the adjacency.
    - Well ID, read from the scene or file name with a regex you can change.
 4. **Aggregation.**
    - Combines the tables of all files and keeps only the latest rescan of each plate.
@@ -126,6 +130,28 @@ python -m cell_analyzer.stages.analysis results/aggregated_cell_measurements.csv
 5. **Analysis.**
    - Plots per condition: violin, box, replicate plots (superplots), ECDFs, plate heatmaps and an overview heatmap.
    - Summary statistics with two tests against the control. The cell-level Mann-Whitney test is only indicative. Use the replicate-level Welch t-test on per-replicate medians. Both are Benjamini-Hochberg corrected.
+
+## Adjacency files
+
+```python
+import scipy.sparse as sp, pandas as pd
+A = sp.load_npz("per_file/<dataset>/adjacency/<scene>_adjacency_matrix.npz")   # symmetric CSR
+# row / column index = cell_id (label value in *_cell_labels.tif, `cell_id` in the measurements)
+# value = number of boundary pixel pairs shared by the two cells; 0 = no contact
+pairs = pd.read_csv("per_file/<dataset>/adjacency/<dataset>_cell_adjacency.csv")
+# scene, cell_id_a, cell_id_b, contact_px, junction_intensity, contact_um
+```
+
+Cells touching the image border are removed before the adjacency is built, so cells next to the border have fewer listed neighbours.
+
+## Changes in 3.2
+
+- **Metric sizes.** All size settings are in µm / µm² and can be left empty; they then follow from *Typical nucleus diameter* and *Typical cell area* (Stages & Channels tab) and the pixel size of each image. Settings files and analysis logs from 3.1 or earlier hold pixel values; they are loaded with `size_units = px` and behave as before.
+- **Junction-only segmentation.** `Cells are found from = junctions` for images without a nuclear stain. No Cellpose, no new dependencies.
+- **Adjacency.** Contact-based neighbour lists and sparse matrices per image in `per_file/<dataset>/adjacency/`; new measurement columns `n_neighbours` and `neighbour_contact_um`.
+- **Watershed surface.** The default is now `intensity`. With `gradient`, one label could run along the junction network between the cells, so neighbouring cells did not touch. `gradient` is repaired too (the dip along the junction centre is closed), which shifts its cell outlines slightly compared with 3.1.
+- The automatic confluence threshold is 30 % of the number of typical cells that fit into the image.
+- Size statistics are in µm and also work without nuclei. The environment is unchanged, so no reinstall is needed.
 
 ## Changes in 3.1
 

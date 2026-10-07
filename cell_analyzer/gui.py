@@ -36,7 +36,7 @@ HELP_COLOR = "#6b6b6b"
 # which schema sections go on which tab
 TABS = [
     ("Input / Output", ["Input", "Output"]),
-    ("Stages & Channels", ["General", "Channels"]),
+    ("Stages & Channels", ["General", "Channels", "Physical sizes"]),
     ("Background", ["Background"]),
     ("Segmentation", ["Segmentation"]),
     ("Non-confluent", ["Non-confluent"]),

@@ -149,7 +149,8 @@ def _dirs(cfg, stem):
                 background=root / cfg["background_subdir"],
                 seg=root / cfg["segmentation_subdir"],
                 qc=root / cfg["qc_subdir"],
-                meas=root / cfg["measurements_subdir"])
+                meas=root / cfg["measurements_subdir"],
+                adj=root / cfg["adjacency_subdir"])
 
 
 def _n_workers(cfg):
@@ -224,7 +225,7 @@ def stage_background(cfg, datasets):
 
 def stage_segmentation(cfg, datasets, backgrounds):
     from .stages.segmentation import (segment_scene, seg_params_from_config, write_segmentation_summary,
-                                      write_object_statistics)
+                                      write_object_statistics, write_adjacency)
 
     params = seg_params_from_config(cfg)
     jobs = []
@@ -236,8 +237,14 @@ def stage_segmentation(cfg, datasets, backgrounds):
             jobs.append((d, s, dirs, bg))
 
     total = len(jobs)
+    use_nuclei = cfg["seed_source"] != "junctions"
     print(f"\n=== Segmentation: {total} scene(s) in {len(datasets)} dataset(s), "
           f"{_n_workers(cfg)} workers ===", flush=True)
+    print("Cells are found from " + ("the nuclei channel" if use_nuclei else
+          "the junction channel alone (no nuclei channel)") + f"; size settings are in "
+          f"{'µm' if cfg['size_units'] == 'um' else 'pixels'}, empty ones are derived from a "
+          f"{cfg['typical_nucleus_diameter_um']:g} µm nucleus and a {cfg['typical_cell_area_um2']:g} µm² cell.", flush=True)
+    sizes_shown, sizes_used = set(), {}
     per_dataset = {d["stem"]: [] for d in datasets}
     counts = dict(ok=0, skipped_exists=0, skipped_sparse=0, error=0)
     errors = []
@@ -245,7 +252,8 @@ def stage_segmentation(cfg, datasets, backgrounds):
     with ProcessPoolExecutor(max_workers=_n_workers(cfg)) as ex:
         futs = {ex.submit(segment_scene, str(d["file"]), s, d["stem"], str(dirs["seg"]),
                           str(dirs["qc"]) if cfg["save_qc_plot"] else None, params,
-                          bg.get(cfg["nuclei_channel"]), bg.get(cfg["edge_channel"])): d["stem"]
+                          bg.get(cfg["nuclei_channel"]) if use_nuclei else None, bg.get(cfg["edge_channel"]),
+                          str(dirs["adj"]) if cfg["save_adjacency"] else None): d["stem"]
                 for d, s, dirs, bg in jobs}
         for f in as_completed(futs):
             stem = futs[f]
@@ -254,6 +262,12 @@ def stage_segmentation(cfg, datasets, backgrounds):
             except Exception as e:  # worker crashed (e.g. out of memory)
                 r = dict(scene="?", status="error", message=f"✗ worker crashed: {e}")
             done += 1
+            if r.get("sizes_px") and stem not in sizes_used:
+                sizes_used[stem] = r["sizes_px"]
+                key = json.dumps(r["sizes_px"], sort_keys=True, default=str)
+                if key not in sizes_shown:        # the full table only once per distinct pixel size / image size
+                    sizes_shown.add(key)
+                    print(f"[{stem}] sizes used (settings converted to pixels for this image):\n{r['sizes_text']}", flush=True)
             print(f"[{stem}] {r['message']}", flush=True)
             counts[r["status"]] = counts.get(r["status"], 0) + 1
             if r["status"] == "error":
@@ -267,10 +281,13 @@ def stage_segmentation(cfg, datasets, backgrounds):
         if per_dataset[d["stem"]]:
             write_segmentation_summary(per_dataset[d["stem"]], _dirs(cfg, d["stem"])["seg"], d["stem"])
             write_object_statistics(per_dataset[d["stem"]], _dirs(cfg, d["stem"])["seg"], d["stem"])
+            if cfg["save_adjacency"]:
+                write_adjacency(per_dataset[d["stem"]], _dirs(cfg, d["stem"])["adj"], d["stem"])
         n_nonconf += sum(1 for r in per_dataset[d["stem"]] if r.get("confluent") is False)
         n_multi += sum(int(r["n_multinucleated"]) for r in per_dataset[d["stem"]]
                        if r.get("n_multinucleated") == r.get("n_multinucleated") and r.get("n_multinucleated"))
-    result = dict(n_scenes=total, **counts, n_nonconfluent_scenes=n_nonconf, n_multinucleated_cells=n_multi, errors=errors)
+    result = dict(n_scenes=total, **counts, n_nonconfluent_scenes=n_nonconf, n_multinucleated_cells=n_multi,
+                  seed_source=cfg["seed_source"], sizes_used_px=sizes_used, errors=errors)
 
     if cfg["save_size_statistics"]:
         from .stages.diagnostics import run_size_statistics
@@ -295,7 +312,7 @@ def stage_measurement(cfg, datasets, backgrounds):
             print(f"↷ Skipping measurement (exists): {csv}", flush=True)
             continue
         todo.append(d)
-        info = load_scene_info(dirs["seg"], d["stem"])
+        info = load_scene_info(dirs["seg"], d["stem"], dirs["adj"])
         bg = backgrounds.get(d["stem"], {}) if cfg["correct_in_measurement"] else {}
         for s in d["scenes"]:
             jobs.append((d, s, dirs, bg, info.get(s)))

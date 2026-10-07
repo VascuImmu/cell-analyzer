@@ -27,7 +27,7 @@ from copy import deepcopy
 from pathlib import Path
 
 APP_NAME = "Cell Analyzer"
-PIPELINE_VERSION = "3.1.1"
+PIPELINE_VERSION = "3.2"
 
 # format key -> file extensions (lower case)
 SUPPORTED_FORMATS = {
@@ -91,6 +91,7 @@ PARAM_SCHEMA = [
         F("segmentation_subdir", "segmentation", "str", "Per file: label images"),
         F("qc_subdir", "segmentation_qc", "str", "Per file: QC plots"),
         F("measurements_subdir", "measurements", "str", "Per file: measurements"),
+        F("adjacency_subdir", "adjacency", "str", "Per file: cell contacts (adjacency)"),
         F("write_dataset_params", True, "bool", "Copy parameters into every dataset folder",
           "Writes <dataset>/analysis_parameters.json so each result folder is self-describing."),
     ]),
@@ -109,7 +110,12 @@ PARAM_SCHEMA = [
     ]),
     # ------------------------------------------------------------------
     ("Channels", [
-        F("nuclei_channel", 0, "int", "Nuclei channel index", "Channel used to seed the watershed (DNA/DAPI)."),
+        F("seed_source", "nuclei", "choice", "Cells are found from",
+          "nuclei = a nuclear stain starts one cell per nucleus (best). "
+          "junctions = NO nuclear stain: cells are found from the junction channel alone -- works for "
+          "confluent cells with (nearly) complete junctions.", ["nuclei", "junctions"]),
+        F("nuclei_channel", 0, "int", "Nuclei channel index", "Channel used to seed the watershed (DNA/DAPI).",
+          enabled_if=("seed_source", ["nuclei"])),
         F("edge_channel", 1, "int", "Edge/junction channel index",
           "Channel used as the whole-cell watershed surface (e.g. VE-Cadherin)."),
         F("channel_names", "DNA, VE-Cadherin, ICAM1, PECAM1", "str_list", "Channel names",
@@ -117,8 +123,20 @@ PARAM_SCHEMA = [
           "Blank = use names from the file metadata."),
         F("edge_channels", "1, 3", "int_list", "Junction channels for boundary intensity",
           "Channels whose intensity is sampled in a thin ring at the cell boundary."),
-        F("pixel_size_um", None, "float_opt", "Pixel size override (µm)",
-          "Blank = read from metadata. Set this if metadata is missing/wrong."),
+    ]),
+    # ------------------------------------------------------------------
+    ("Physical sizes", [
+        F("pixel_size_um", None, "float_opt", "Pixel size (µm)",
+          "Empty = read from each image's metadata (normal case). Enter it only if the metadata is "
+          "missing or wrong."),
+        F("typical_nucleus_diameter_um", 10.0, "float", "Typical nucleus diameter (µm)",
+          "All size settings left empty are derived from this and the cell area below, converted to "
+          "pixels with each image's pixel size."),
+        F("typical_cell_area_um2", 1000.0, "float", "Typical cell area (µm²)",
+          "e.g. 1000 µm² for HUVEC (about 20 × 50 µm)."),
+        F("size_units", "um", "choice", "Units of the size settings",
+          "um = sizes you type on the other tabs are in µm / µm² (recommended). "
+          "px = they are in pixels (settings files from before version 3.2).", ["um", "px"]),
     ]),
     # ------------------------------------------------------------------
     ("Background", [
@@ -151,67 +169,99 @@ PARAM_SCHEMA = [
     ("Segmentation", [
         F("seg_mode", "mip", "choice", "Z handling",
           "mip = max projection (required for measurement); per_slice; 3d.", ["mip", "per_slice", "3d"]),
-        F("nuclei_sigma", 1.5, "float", "Nuclei smoothing sigma (px)"),
-        F("min_nucleus_size", 1100, "int", "Min. nucleus size (px)", "Smaller objects are removed before seeding."),
-        F("min_distance", 20, "int", "Min. distance between nucleus seeds (px)",
-          "Lower = more aggressive splitting of touching nuclei."),
+        F("nuclei_sigma", None, "float_opt", "Nuclei smoothing sigma",
+          "Empty = automatic: nucleus diameter ÷ 40 (0.25 µm).", enabled_if=("seed_source", ["nuclei"])),
+        F("min_nucleus_size", None, "float_opt", "Min. nucleus size (area)",
+          "Smaller objects are removed before seeding. Empty = automatic: ⅓ of a nucleus area (26 µm²).",
+          enabled_if=("seed_source", ["nuclei"])),
+        F("min_distance", None, "float_opt", "Min. distance between nucleus seeds",
+          "Lower = more aggressive splitting of touching nuclei. Empty = automatic: 0.35 × nucleus diameter (3.5 µm).",
+          enabled_if=("seed_source", ["nuclei"])),
         F("split_touching_nuclei", True, "bool", "Split touching nuclei",
           "On = touching nuclei stay separate after the nuclei watershed. Off = reproduces the original "
           "script, where a re-labelling step merged them back into one object (use only to compare with "
-          "old results)."),
-        F("edge_sigma", 3.0, "float", "Edge-channel smoothing sigma (px)"),
-        F("edge_mode", "gradient", "choice", "Watershed surface",
-          "gradient = Sobel gradient magnitude of the smoothed edge channel (was 'LoG' in the old code); "
-          "intensity = smoothed edge intensity.", ["gradient", "intensity"]),
-        F("min_label_size", 2000, "int", "Min. cell size (px)", "Smaller cells are removed after segmentation."),
+          "old results).", enabled_if=("seed_source", ["nuclei"])),
+        F("edge_sigma", None, "float_opt", "Junction smoothing sigma",
+          "Empty = automatic: nucleus diameter ÷ 20 (0.5 µm)."),
+        F("edge_mode", "intensity", "choice", "Watershed surface",
+          "The landscape the cells grow on. intensity (recommended) = the smoothed junction image; cell "
+          "borders run exactly along the middle of the junctions. gradient = Sobel gradient of that image "
+          "(called 'LoG' in the old scripts); borders are less precise.", ["intensity", "gradient"]),
+        F("min_label_size", None, "float_opt", "Min. cell size (area)",
+          "Smaller cells are removed after segmentation. Empty = automatic: 1/10 of a cell area (100 µm²)."),
         F("merge_multinucleated", True, "bool", "Keep multi-nucleated cells together",
           "Every nucleus starts its own cell, so a cell with two nuclei is first cut in two. With this on, "
           "two neighbouring cells are merged back into one when their nuclei are close AND there is no "
-          "junction signal on the boundary between them. Merged cells are marked in cyan in the QC pictures."),
-        F("multinuc_max_distance", 0, "int", "Max. distance between the nuclei (px, 0 = auto)",
+          "junction signal on the boundary between them. Merged cells are marked in cyan in the QC pictures.",
+          enabled_if=("seed_source", ["nuclei"])),
+        F("multinuc_max_distance", None, "float_opt", "Max. distance between the nuclei of one cell",
           "Only nuclei whose centres are closer than this can belong to one cell. "
-          "0 = automatic: two typical nucleus diameters.", enabled_if=("merge_multinucleated", [True])),
+          "Empty = automatic: two nucleus diameters (20 µm).", enabled_if=("seed_source", ["nuclei"])),
         F("multinuc_junction_ratio", 0.5, "float", "Junction strength needed to keep two cells apart",
           "0 = like the signal under the nuclei (no junction), 1 = like a typical cell-cell boundary of the "
           "same image. Boundaries weaker than this value count as 'no junction'. Lower = merges less often.",
-          enabled_if=("merge_multinucleated", [True])),
+          enabled_if=("seed_source", ["nuclei"])),
         F("multinuc_max_nuclei", 2, "int", "Max. nuclei per cell",
           "Stops chains of merges in regions with weak junction staining.",
-          enabled_if=("merge_multinucleated", [True])),
-        F("multinuc_band_px", 2, "int", "Boundary search width (px)",
-          "The junction is looked for within this many pixels of the boundary between the two cells.",
-          enabled_if=("merge_multinucleated", [True]), advanced=True),
+          enabled_if=("seed_source", ["nuclei"])),
+        F("multinuc_band_px", None, "float_opt", "Junction search width",
+          "The junction is looked for within this distance of the boundary between two cells. "
+          "Empty = automatic: nucleus diameter ÷ 30 (0.33 µm).", advanced=True),
+        F("seed_sigma", None, "float_opt", "No nuclei: smoothing to find cell centres",
+          "The junction image is blurred this much; every dark basin that remains starts one cell. "
+          "Larger = fewer starting points. Empty = automatic: cell width ÷ 8 (2.5 µm).",
+          enabled_if=("seed_source", ["junctions"])),
+        F("seed_min_depth", 0.02, "float", "No nuclei: min. depth of a cell centre",
+          "How much darker than its surroundings a basin must be (fraction of the image contrast). "
+          "Lower = more starting points (extra ones are merged again by the next setting).",
+          enabled_if=("seed_source", ["junctions"])),
+        F("junction_merge_ratio", 0.4, "float", "No nuclei: junction strength needed between two cells",
+          "Two neighbouring regions are merged when the boundary between them is weaker than this: "
+          "0 = as dark as a cell centre, 1 = as bright as a clear junction of the same image. "
+          "Lower (0.3) if real cells get merged where junctions have gaps; higher (0.5) if cells stay cut in pieces.",
+          enabled_if=("seed_source", ["junctions"])),
+        F("max_cell_area", None, "float_opt", "No nuclei: max. cell size after merging (area)",
+          "Regions are never merged into something larger than this. Empty = automatic: 4 × cell area (4000 µm²).",
+          enabled_if=("seed_source", ["junctions"])),
         F("clear_border_labels", True, "bool", "Remove cells touching the image border"),
-        F("clear_border_buffer", 10, "int", "Border buffer (px)", enabled_if=("clear_border_labels", [True])),
+        F("clear_border_buffer", None, "float_opt", "Border buffer",
+          "Empty = automatic: nucleus diameter ÷ 6 (1.7 µm).", enabled_if=("clear_border_labels", [True])),
         F("overwrite_segmentation", True, "bool", "Overwrite existing label images"),
-        F("save_nuclei_mask", True, "bool", "Save binary nuclei mask"),
+        F("save_nuclei_mask", True, "bool", "Save binary nuclei mask", enabled_if=("seed_source", ["nuclei"])),
         F("save_qc_plot", True, "bool", "Save QC overlay plots"),
         F("qc_dpi", 100, "int", "QC plot DPI", enabled_if=("save_qc_plot", [True])),
         F("save_size_statistics", True, "bool", "Save size-statistics plots",
           "After segmentation: histograms of nucleus/cell area, diameter, eccentricity, distance between "
-          "nuclei and nuclei per cell (in pixels), with your current thresholds drawn in and suggested "
-          "starting values. Saved in each file's segmentation_qc folder and in results/size_statistics."),
+          "nuclei and nuclei per cell (in µm), with your current thresholds drawn in and suggested "
+          "values. Saved in each file's segmentation_qc folder and in results/size_statistics."),
+        F("save_adjacency", True, "bool", "Save which cells touch each other (adjacency)",
+          "For spatial analysis: every pair of cells that share a boundary, with the length of the contact. "
+          "Saved per file in the adjacency folder (table + sparse matrix per image); the measurements get a "
+          "column n_neighbours."),
     ]),
     # ------------------------------------------------------------------
     ("Non-confluent", [
         F("nonconfluent_enabled", True, "bool", "Enable non-confluent analysis",
           "If a scene has fewer nuclei than the threshold below it is treated as NON-confluent and the "
           "cell watershed is restricted to a foreground mask (instead of flooding the whole field)."),
-        F("min_nuclei_confluent", 2580, "int", "Min. nuclei for a scene to count as confluent",
+        F("min_nuclei_confluent", None, "float_opt", "Min. nuclei (cells) for a scene to count as confluent",
           "Scenes with at least this many nuclei are segmented as a confluent monolayer. "
+          "Empty = automatic: 30 % of the cells that would fit into the image at the typical cell area. "
           "Set it very high to always use the foreground mask."),
         F("foreground_mask", "union", "choice", "Foreground mask (non-confluent scenes)",
           "union = dilated nuclei OR bright edge signal; nuclei = dilated nuclei only; "
-          "edge = thresholded edge channel only.", ["union", "nuclei", "edge"],
-          enabled_if=("nonconfluent_enabled", [True])),
-        F("edge_threshold", 165.0, "float_opt", "Edge intensity threshold",
-          "Absolute threshold on the smoothed edge channel. Blank = use the percentile below.",
+          "edge = thresholded edge channel only. Without a nuclei channel the area enclosed by junctions is used.",
+          ["union", "nuclei", "edge"], enabled_if=("nonconfluent_enabled", [True])),
+        F("edge_threshold", None, "float_opt", "Edge intensity threshold",
+          "Absolute intensity threshold on the smoothed edge channel. Empty = use the percentile below.",
           enabled_if=("nonconfluent_enabled", [True])),
         F("edge_threshold_percentile", 20.0, "float", "Edge threshold percentile",
           "Only used when the absolute threshold is blank.", enabled_if=("nonconfluent_enabled", [True])),
-        F("nuc_dilation_rad", 7, "int", "Nuclei dilation radius (px)", enabled_if=("nonconfluent_enabled", [True])),
+        F("nuc_dilation_rad", None, "float_opt", "Nuclei dilation radius",
+          "Empty = automatic: nucleus diameter ÷ 9 (1.1 µm).", enabled_if=("nonconfluent_enabled", [True])),
         F("nuc_dilation_iterations", 3, "int", "Nuclei dilation iterations", enabled_if=("nonconfluent_enabled", [True])),
-        F("min_hole_size", 2000, "int", "Fill holes smaller than (px)", enabled_if=("nonconfluent_enabled", [True])),
+        F("min_hole_size", None, "float_opt", "Fill holes smaller than (area)",
+          "Empty = automatic: 1/20 of a cell area (50 µm²).", enabled_if=("nonconfluent_enabled", [True])),
         F("sparse_policy", "confluent", "choice", "If disabled: scenes below the threshold are...",
           "confluent = segment them like every other scene (whole field flooded); "
           "skip = do not segment/measure them at all.", ["confluent", "skip"],
@@ -221,7 +271,9 @@ PARAM_SCHEMA = [
     ("Measurement", [
         F("overwrite_measurement", True, "bool", "Overwrite existing measurement tables"),
         F("measure_nuclei", True, "bool", "Also measure nuclei (nuc_* columns)"),
-        F("boundary_band_px", 1, "int", "Boundary ring width (px)"),
+        F("boundary_band_px", None, "float_opt", "Boundary ring width",
+          "Width of the ring along the cell border in which junction intensity is measured. "
+          "Empty = automatic: nucleus diameter ÷ 60, at least 1 pixel."),
         F("ruggedness_smooth_frac", 0.02, "float", "Ruggedness smoothing (fraction of contour length)"),
         F("ruggedness_min_sigma", 1.5, "float", "Ruggedness min. smoothing sigma"),
         F("save_pickle", True, "bool", "Also save .pkl with per-cell boundary intensity arrays"),
@@ -310,6 +362,12 @@ PARAM_SCHEMA = [
 ALL_FIELDS = {f["key"]: f for _, fields in PARAM_SCHEMA for f in fields}
 
 
+# size settings that existed (in pixels) before version 3.2
+LEGACY_PIXEL_KEYS = ("nuclei_sigma", "min_nucleus_size", "min_distance", "edge_sigma", "min_label_size",
+                     "clear_border_buffer", "nuc_dilation_rad", "min_hole_size", "boundary_band_px",
+                     "multinuc_band_px", "min_nuclei_confluent")
+
+
 def default_config():
     return {k: deepcopy(f["default"]) for k, f in ALL_FIELDS.items()}
 
@@ -382,7 +440,13 @@ def normalize_config(cfg):
     """Fill in defaults for missing keys, coerce types, keep unknown keys out."""
     out = default_config()
     unknown = []
-    for k, v in (cfg or {}).items():
+    cfg = dict(cfg or {})
+    # Settings saved before version 3.2 have no 'size_units' and give all sizes in PIXELS.
+    if "size_units" not in cfg and any(k in cfg for k in LEGACY_PIXEL_KEYS):
+        cfg["size_units"] = "px"
+        if cfg.get("multinuc_max_distance") in (0, "0", 0.0):
+            cfg["multinuc_max_distance"] = None          # 0 meant "automatic"
+    for k, v in cfg.items():
         if k in ALL_FIELDS:
             out[k] = coerce(k, v)
         else:
@@ -422,8 +486,15 @@ def validate_config(cfg):
                     problems.append(f"Background file for channel {ch} not found: {p}")
         except ValueError as e:
             problems.append(str(e))
-    if cfg["nuclei_channel"] == cfg["edge_channel"]:
-        problems.append("Nuclei and edge channel are identical.")
+    if cfg["seed_source"] == "nuclei" and cfg["nuclei_channel"] == cfg["edge_channel"]:
+        problems.append("Nuclei and edge channel are identical. (No nuclear stain? Set 'Cells are found from' "
+                        "to 'junctions' on the Stages & Channels tab.)")
+    for key in ("typical_nucleus_diameter_um", "typical_cell_area_um2"):
+        if not cfg[key] or cfg[key] <= 0:
+            problems.append(f"'{ALL_FIELDS[key]['label']}' must be a positive number.")
+    for key in LEGACY_PIXEL_KEYS + ("seed_sigma", "max_cell_area", "multinuc_max_distance", "pixel_size_um"):
+        if cfg.get(key) is not None and cfg[key] < 0:
+            problems.append(f"'{ALL_FIELDS[key]['label']}' cannot be negative.")
     if cfg["run_aggregation"] and cfg["plate_map_path"] and not Path(cfg["plate_map_path"]).exists():
         problems.append(f"Plate map not found: {cfg['plate_map_path']}")
     import re

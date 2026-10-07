@@ -223,6 +223,13 @@ def _pixel_size(img):
         return None
 
 
+def scene_geometry(path, scene):
+    """(pixel size in µm or None, (Y, X) shape) of one scene -- metadata only, no pixels are read."""
+    img = open_image(path)
+    img.set_scene(scene)
+    return _pixel_size(img), (int(img.dims.Y), int(img.dims.X))
+
+
 # -------------------------------------------------
 # Pixel loading (lazy: only the requested channel ever leaves the disk)
 # -------------------------------------------------

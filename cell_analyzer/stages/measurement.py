@@ -10,6 +10,8 @@ Per cell (cell and nucleus share the label ID):
   * boundary-ring intensity (edge_mean/std/cv_*) for junction channels
   * n_nuclei: nuclei in the cell (>1 for multi-nucleated cells kept together by the segmentation;
     their nuc_* values then describe all nuclei of the cell together)
+  * n_neighbours / neighbour_contact_um: number of cells this cell touches and the total length of
+    those contacts (from the contact-based adjacency of the segmentation)
   * identifiers: dataset, file, scene, well_row / well_column / well_id
     (NaN when there is no well information, e.g. plain .czi files),
     and the scene's confluence state from the segmentation summary.
@@ -44,6 +46,7 @@ DEFAULT_MEAS_PARAMS = dict(
     channel_names="",
     edge_channels="1, 3",
     boundary_band_px=1,
+    size_units="px", typical_nucleus_diameter_um=10.0, typical_cell_area_um2=1000.0,
     ruggedness_smooth_frac=0.02,
     ruggedness_min_sigma=1.5,
     measure_nuclei=True,
@@ -150,7 +153,11 @@ def measure_scene(file_str, scene, dataset_stem, seg_dir_str, p, background_path
 
     nuc_props = {q.label: q for q in regionprops(nuclei_labels)} if nuclei_labels is not None else {}
 
+    from ..sizes import resolve_one
+    band_px = resolve_one(p, "boundary_band_px", pixel_size)      # µm setting -> pixels for this image
     nuclei_per_cell = scene_info.get("nuclei_per_cell") or {}
+    neighbours = scene_info.get("neighbours")                       # {cell_id: (n, contact_px)} or None
+    no_nuclei = scene_info.get("seed_source") == "junctions"
     rows, extras = [], {}
     for prop in regionprops(cell_labels):
         lid = int(prop.label)
@@ -166,7 +173,9 @@ def measure_scene(file_str, scene, dataset_stem, seg_dir_str, p, background_path
             "scene_confluent": scene_info.get("confluent"),
             "scene_n_nuclei": scene_info.get("n_nuclei"),
             "cell_id": lid,
-            "n_nuclei": nuclei_per_cell.get(lid, 1),
+            "n_nuclei": np.nan if no_nuclei else nuclei_per_cell.get(lid, 1),
+            "n_neighbours": neighbours.get(lid, (0, 0))[0] if neighbours is not None else np.nan,
+            "neighbour_contact_um": neighbours.get(lid, (0, 0))[1] * px if neighbours is not None else np.nan,
             "pixel_size_um": px,
             "area_px": prop.area,
             "area_um2": prop.area * px ** 2,
@@ -211,7 +220,7 @@ def measure_scene(file_str, scene, dataset_stem, seg_dir_str, p, background_path
 
         cell_extra = {}
         for c in edge_channels:
-            bv = sample_boundary_intensity(m, stack[c, r0:r1, c0:c1], band_px=p["boundary_band_px"])
+            bv = sample_boundary_intensity(m, stack[c, r0:r1, c0:c1], band_px=band_px)
             mean_v = float(bv.mean()) if bv.size else np.nan
             std_v = float(bv.std()) if bv.size else np.nan
             row[f"edge_mean_{names[c]}"] = mean_v
@@ -240,13 +249,28 @@ def save_measurements(rows, extras_by_scene, out_dir, dataset_stem, save_pickle=
     return csv_path
 
 
-def load_scene_info(seg_dir, dataset_stem):
+def load_scene_info(seg_dir, dataset_stem, adj_dir=None):
     path = Path(seg_dir) / f"{dataset_stem}_segmentation_summary.csv"
     if not path.exists():
         return {}
     df = pd.read_csv(path)
-    info = {r["scene"]: {"confluent": r.get("confluent"), "n_nuclei": r.get("n_nuclei"), "status": r.get("status")}
+    info = {r["scene"]: {"confluent": r.get("confluent"), "n_nuclei": r.get("n_nuclei"), "status": r.get("status"),
+                         "seed_source": r.get("seed_source")}
             for r in df.to_dict("records")}
+    # touching neighbours per cell (contact-based adjacency written by the segmentation)
+    adj = Path(adj_dir) / f"{dataset_stem}_cell_adjacency.csv" if adj_dir else None
+    if adj is not None and adj.exists():
+        try:
+            a = pd.read_csv(adj, usecols=["scene", "cell_id_a", "cell_id_b", "contact_px"])
+            both = pd.concat([a.rename(columns={"cell_id_a": "cell"})[["scene", "cell", "contact_px"]],
+                              a.rename(columns={"cell_id_b": "cell"})[["scene", "cell", "contact_px"]]])
+            agg = both.groupby(["scene", "cell"])["contact_px"].agg(["size", "sum"])
+            for scene in info:
+                info[scene]["neighbours"] = {}
+            for (scene, cell), row in agg.iterrows():
+                info.setdefault(scene, {}).setdefault("neighbours", {})[int(cell)] = (int(row["size"]), float(row["sum"]))
+        except Exception:
+            pass
     # nuclei per cell (multi-nucleated cells that the segmentation kept together)
     cs = Path(seg_dir) / f"{dataset_stem}_cell_statistics.csv"
     if cs.exists():
