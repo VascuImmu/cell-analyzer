@@ -69,6 +69,7 @@ cell-analyzer/
         ├── flatfield.py         applies a background field
         ├── segmentation.py   2  nuclei + cell watershed (or junction-only seeding), multi-nucleated cells, adjacency, QC plots
         ├── diagnostics.py       size statistics of nuclei and cells, suggested settings
+        ├── overview.py          overview pictures of the raw images (channels side by side, merge, scale bar)
         ├── measurement.py    3  per-cell shape, intensity and junction measurements
         ├── aggregation.py    4  one combined table, plate map, Z-scores
         └── analysis.py       5  plots and statistics per condition
@@ -85,6 +86,7 @@ cell-analyzer/
 ├── per_file/<dataset>/                       one folder per input file
 │   ├── analysis_parameters.json
 │   ├── segmentation_qc/  segmentation/  measurements/  background/
+│   ├── overview/                             <scene>_overview.png (if switched on)
 │   └── adjacency/                            which cells touch: <dataset>_cell_adjacency.csv, <scene>_adjacency_matrix.npz
 ├── pooled_background/                        background mode "pooled"
 └── logs/                                     analysis_log_<time>.json / .txt / _console.txt
@@ -149,6 +151,7 @@ Cells touching the image border are removed before the adjacency is built, so ce
 - **Metric sizes.** All size settings are in µm / µm² and can be left empty; they then follow from *Typical nucleus diameter* and *Typical cell area* (Stages & Channels tab) and the pixel size of each image. Settings files and analysis logs from 3.1 or earlier hold pixel values; they are loaded with `size_units = px` and behave as before.
 - **Junction-only segmentation.** `Cells are found from = junctions` for images without a nuclear stain. No Cellpose, no new dependencies.
 - **Adjacency.** Contact-based neighbour lists and sparse matrices per image in `per_file/<dataset>/adjacency/`; new measurement columns `n_neighbours` and `neighbour_contact_um`.
+- **Overview pictures** (`stages/overview.py`, off by default). `run_overview` writes one picture per scene with every channel in its own panel, a merged panel (screen blending) and a scale bar; settings on the Overview pictures tab. `multi_channel_plot()` can also be imported and used on any (C, Y, X) array.
 - **Watershed surface.** The default is now `intensity`. With `gradient`, one label could run along the junction network between the cells, so neighbouring cells did not touch. `gradient` is repaired too (the dip along the junction centre is closed), which shifts its cell outlines slightly compared with 3.1.
 - The automatic confluence threshold is 30 % of the number of typical cells that fit into the image.
 - Size statistics are in µm and also work without nuclei. The environment is unchanged, so no reinstall is needed.

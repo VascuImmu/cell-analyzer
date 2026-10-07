@@ -92,6 +92,7 @@ PARAM_SCHEMA = [
         F("qc_subdir", "segmentation_qc", "str", "Per file: QC plots"),
         F("measurements_subdir", "measurements", "str", "Per file: measurements"),
         F("adjacency_subdir", "adjacency", "str", "Per file: cell contacts (adjacency)"),
+        F("overview_subdir", "overview", "str", "Per file: overview pictures"),
         F("write_dataset_params", True, "bool", "Copy parameters into every dataset folder",
           "Writes <dataset>/analysis_parameters.json so each result folder is self-describing."),
     ]),
@@ -104,6 +105,9 @@ PARAM_SCHEMA = [
         F("run_aggregation", True, "bool", "Stage 4: aggregate all measurements"),
         F("run_analysis", True, "bool", "Stage 5: analysis plots per condition",
           "Violin/box/replicate plots, ECDFs, plate heatmaps and summary statistics from the aggregated table."),
+        F("run_overview", False, "bool", "Extra: overview pictures of the raw images",
+          "One picture per scene with every channel side by side (and merged), with a scale bar. "
+          "Settings on the 'Overview pictures' tab."),
         F("n_workers", 0, "int", "Parallel worker processes (0 = auto)",
           "Scenes are processed in parallel. On a 16 GB machine keep this at 2-6."),
         F("timepoint", 0, "int", "Timepoint index", "Which T to analyse for time-lapse data.", advanced=True),
@@ -282,6 +286,36 @@ PARAM_SCHEMA = [
           "Default matches LIF scenes like '.../B/5_Merged'."),
         F("well_regex_fallback", True, "bool", "Fallback: generic well pattern (B5 / B05)",
           "If the regex above doesn't match, look for a stand-alone token like 'B5' or 'B05'."),
+    ]),
+    # ------------------------------------------------------------------
+    ("Overview", [
+        F("overview_channels", "", "str", "Channels to show",
+          "Channel numbers, comma-separated, counting from 0 (e.g. 0, 1, 3). Blank = all channels."),
+        F("overview_merge", True, "bool", "Add a merged panel",
+          "All channels on top of each other in their colours (additive blending, as in napari/Fiji composite)."),
+        F("overview_merge_channels", "", "str", "Channels in the merged panel",
+          "Blank = all shown channels. With a grey channel in the merge the picture gets pale -- "
+          "leave it out here if needed.", enabled_if=("overview_merge", [True])),
+        F("overview_colored", True, "bool", "Coloured single-channel panels",
+          "Off = single channels in grey (the merged panel stays coloured)."),
+        F("overview_colors", "gray, green, cyan, yellow, magenta", "str", "Colours",
+          "One colour per shown channel, in order; repeated if there are more channels. "
+          "Names such as gray, green, cyan, yellow, magenta, red, blue, orange or hex codes (#ff8800)."),
+        F("overview_percentile", 99.5, "float", "Brightness: white point (percentile)",
+          "Each channel is scaled so that this percentage of its pixels is below full brightness. "
+          "Lower (99) = brighter pictures, higher (99.9) = fewer saturated pixels."),
+        F("overview_low_percentile", 0.0, "float", "Brightness: black point (percentile)",
+          "0 = intensity zero is black. A few percent (e.g. 1-5) removes a uniform background haze.", advanced=True),
+        F("overview_scalebar", True, "bool", "Scale bar", "Needs the pixel size (from the file or the Stages & Channels tab)."),
+        F("overview_scalebar_um", None, "float_opt", "Scale bar length (µm)",
+          "Empty = automatic: a round number of about 1/5 of the image width.", enabled_if=("overview_scalebar", [True])),
+        F("overview_title", True, "bool", "Title (file and scene name)"),
+        F("overview_max_scenes", 0, "int", "Max. pictures per file (0 = all)",
+          "The pictures are spread evenly over the scenes of the file."),
+        F("overview_max_px", 2000, "int", "Shrink images larger than (px, 0 = never)",
+          "Large stitched images are averaged down to this size per panel to save memory and disk space."),
+        F("overview_dpi", 200, "int", "Resolution (dpi)", advanced=True),
+        F("overwrite_overview", True, "bool", "Overwrite existing overview pictures"),
     ]),
     # ------------------------------------------------------------------
     ("Aggregation", [

@@ -41,6 +41,7 @@ TABS = [
     ("Segmentation", ["Segmentation"]),
     ("Non-confluent", ["Non-confluent"]),
     ("Measurement", ["Measurement"]),
+    ("Overview pictures", ["Overview"]),
     ("Aggregation", ["Aggregation"]),
     ("Analysis plots", ["Analysis"]),
 ]
@@ -747,7 +748,7 @@ class CellAnalyzerGUI(tk.Tk):
         cfg = self._check(quiet_ok=True)
         if cfg is None:
             return
-        stages = [n for k, n in [("run_background", "background"), ("run_segmentation", "segmentation"),
+        stages = [n for k, n in [("run_overview", "overview pictures"), ("run_background", "background"), ("run_segmentation", "segmentation"),
                                  ("run_measurement", "measurement"), ("run_aggregation", "aggregation"),
                                  ("run_analysis", "analysis plots")] if cfg[k]]
         nc = (f"enabled (< {cfg['min_nuclei_confluent']} nuclei → '{cfg['foreground_mask']}' mask)"

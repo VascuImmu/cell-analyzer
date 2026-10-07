@@ -43,6 +43,7 @@ overwrite_* option is set, so an interrupted run can simply be restarted.
 import argparse
 import datetime as dt
 import json
+import numpy as np
 import multiprocessing
 import os
 import platform
@@ -150,7 +151,8 @@ def _dirs(cfg, stem):
                 seg=root / cfg["segmentation_subdir"],
                 qc=root / cfg["qc_subdir"],
                 meas=root / cfg["measurements_subdir"],
-                adj=root / cfg["adjacency_subdir"])
+                adj=root / cfg["adjacency_subdir"],
+                overview=root / cfg["overview_subdir"])
 
 
 def _n_workers(cfg):
@@ -221,6 +223,40 @@ def stage_background(cfg, datasets):
             summary["fields"][d["stem"]] = {str(k): v for k, v in got.items()}
             progress("background", i, len(datasets))
     return result, summary
+
+
+def stage_overview(cfg, datasets):
+    from .stages.overview import overview_scene
+
+    jobs = []
+    limit = int(cfg["overview_max_scenes"] or 0)
+    for d in datasets:
+        scenes = list(d["scenes"])
+        if limit and len(scenes) > limit:
+            scenes = [scenes[i] for i in sorted(set(np.linspace(0, len(scenes) - 1, limit).round().astype(int)))]
+        out = _dirs(cfg, d["stem"])["overview"]
+        out.mkdir(parents=True, exist_ok=True)
+        jobs += [(d, s, out) for s in scenes]
+    total = len(jobs)
+    print(f"\n=== Overview pictures: {total} scene(s), {_n_workers(cfg)} workers ===", flush=True)
+    counts, errors, done = dict(ok=0, skipped_exists=0, error=0), [], 0
+    with ProcessPoolExecutor(max_workers=_n_workers(cfg)) as ex:
+        futs = {ex.submit(overview_scene, str(d["file"]), s, d["stem"], str(out), cfg): (d["stem"], s) for d, s, out in jobs}
+        for f in as_completed(futs):
+            stem, scene = futs[f]
+            done += 1
+            try:
+                r = f.result()
+                counts[r["status"]] += 1
+                print(f"[{stem}] " + ("✓ overview: " if r["status"] == "ok" else "↷ exists: ") + Path(r["file"]).name, flush=True)
+            except Exception as e:
+                counts["error"] += 1
+                errors.append(dict(dataset=stem, scene=scene, error=f"{type(e).__name__}: {e}"))
+                print(f"[{stem}] ✗ overview failed for {scene}: {type(e).__name__}: {e}", flush=True)
+            progress("overview", done, total)
+    if jobs:
+        print(f"✓ Overview pictures in {output_paths(cfg)['datasets']}/<file>/{cfg['overview_subdir']}/", flush=True)
+    return dict(n_scenes=total, **counts, errors=errors)
 
 
 def stage_segmentation(cfg, datasets, backgrounds):
@@ -374,7 +410,8 @@ def run_pipeline(cfg):
         print(f"Analysis log: {log.base}.json", flush=True)
         print(f"Input: {cfg['input_path']}  (mode: {io_utils.resolve_input_mode(cfg)})", flush=True)
 
-        needs_images = cfg["run_background"] or cfg["run_segmentation"] or cfg["run_measurement"]
+        needs_images = (cfg["run_background"] or cfg["run_segmentation"] or cfg["run_measurement"]
+                        or cfg["run_overview"])
         datasets = io_utils.resolve_jobs(cfg) if needs_images else []
         log.data["inputs"] = [dict(file=str(d["file"]), dataset=d["stem"], format=d["format"],
                                    n_scenes_total=d["n_scenes_total"], n_scenes_used=len(d["scenes"]),
@@ -394,6 +431,9 @@ def run_pipeline(cfg):
                                    scenes=d["scenes"], config=cfg), f, indent=2, default=str)
 
         if datasets:
+            if cfg["run_overview"]:
+                log.data["stages"]["overview"] = stage_overview(cfg, datasets)
+                log.save()
             backgrounds, s = stage_background(cfg, datasets)
             log.data["stages"]["background"] = s
             log.save()
