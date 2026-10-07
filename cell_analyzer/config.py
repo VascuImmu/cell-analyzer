@@ -298,9 +298,10 @@ PARAM_SCHEMA = [
           "leave it out here if needed.", enabled_if=("overview_merge", [True])),
         F("overview_colored", True, "bool", "Coloured single-channel panels",
           "Off = single channels in grey (the merged panel stays coloured)."),
-        F("overview_colors", "gray, green, cyan, yellow, magenta", "str", "Colours",
+        F("overview_colors", "gray, cyan, magenta, yellow, green", "str", "Colours",
           "One colour per shown channel, in order; repeated if there are more channels. "
-          "Names such as gray, green, cyan, yellow, magenta, red, blue, orange or hex codes (#ff8800)."),
+          "The default is colour-blind friendly: cyan, magenta and yellow first, green only as the fourth colour. "
+          "Names (gray, cyan, magenta, yellow, green, blue, orange, red) or hex codes (#ff8800). Avoid red together with green."),
         F("overview_percentile", 99.5, "float", "Brightness: white point (percentile)",
           "Each channel is scaled so that this percentage of its pixels is below full brightness. "
           "Lower (99) = brighter pictures, higher (99.9) = fewer saturated pixels."),

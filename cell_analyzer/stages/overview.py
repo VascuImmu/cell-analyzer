@@ -25,7 +25,9 @@ from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
 
 from .. import io_utils
 
-DEFAULT_COLORS = ["gray", "green", "cyan", "yellow", "magenta"]
+# colour-blind friendly order: cyan / magenta / yellow are told apart with every common colour-vision
+# deficiency; green comes last because it can be confused with yellow
+DEFAULT_COLORS = ["gray", "cyan", "magenta", "yellow", "green"]
 _BRIGHT = {"green": (0.0, 1.0, 0.0), "gray": (1.0, 1.0, 1.0), "grey": (1.0, 1.0, 1.0), "white": (1.0, 1.0, 1.0),
            "blue": (0.25, 0.45, 1.0), "red": (1.0, 0.0, 0.0), "orange": (1.0, 0.55, 0.0)}
 _NICE = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000]
