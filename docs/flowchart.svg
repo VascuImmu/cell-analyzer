@@ -1,0 +1,200 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="flow" width="1140" height="2056" viewBox="0 0 1140 2056" role="img" aria-labelledby="ft"><title id="ft">Flow of the Cell Analyzer program from start to results</title><style>
+
+svg {
+  --bg: #f6f7f6; --fg: #1d2421; --muted: #5d6762; --line: #8a958f;
+  --node: #ffffff; --stroke: #c3cbc6; --accent: #2f6f5e; --accent-soft: #e2efe9;
+  --nuc: #2b62b8; --nuc-soft: #e8eef9; --jun: #9a3d8f; --jun-soft: #f6e9f4;
+  --out: #eef0ee; --pre: #f0f2f0;
+  --sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif; --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { svg {
+  --bg: #141917; --fg: #e3e8e5; --muted: #9aa49f; --line: #7d8883;
+  --node: #1d2421; --stroke: #3a4440; --accent: #7cc4ad; --accent-soft: #1f3530;
+  --nuc: #8db3f0; --nuc-soft: #1c2638; --jun: #e09ad6; --jun-soft: #33212f;
+  --out: #1a201d; --pre: #1a201e; color-scheme: dark } }
+svg.never {
+  --bg: #141917; --fg: #e3e8e5; --muted: #9aa49f; --line: #7d8883;
+  --node: #1d2421; --stroke: #3a4440; --accent: #7cc4ad; --accent-soft: #1f3530;
+  --nuc: #8db3f0; --nuc-soft: #1c2638; --jun: #e09ad6; --jun-soft: #33212f;
+  --out: #1a201d; --pre: #1a201e; color-scheme: dark }
+svg.flow { display: block; width: 100%; min-width: 860px; height: auto; font-family: var(--sans); }
+.n { fill: var(--node); stroke: var(--stroke); stroke-width: 1.3; }
+.n.off { stroke: var(--accent); stroke-dasharray: 6 4; }
+.n.pre { fill: var(--pre); }
+.n.nuc { fill: var(--nuc-soft); stroke: var(--nuc); }
+.n.jun { fill: var(--jun-soft); stroke: var(--jun); }
+.dec { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.3; }
+.grp { fill: none; stroke: var(--accent); stroke-width: 1.2; opacity: 0.55; }
+.gt { font-size: 15px; font-weight: 600; fill: var(--fg); }
+.gsub { font-weight: 400; fill: var(--muted); }
+.end { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.3; }
+.t { font-size: 14.5px; font-weight: 600; fill: var(--fg); text-anchor: middle; }
+.s { font-size: 12px; fill: var(--muted); text-anchor: middle; }
+.badge { fill: var(--accent); font-weight: 600; }
+.m { font-family: var(--mono); font-size: 11px; fill: var(--muted); }
+.out { fill: var(--out); stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 3; }
+.a { fill: none; stroke: var(--line); stroke-width: 1.4; }
+.ahp { fill: var(--line); }
+.o { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 3; }
+.br { fill: none; stroke: var(--line); stroke-width: 1.2; }
+.lbl { font-size: 12px; fill: var(--fg); font-weight: 500; }
+.lbl.dim { fill: var(--muted); font-weight: 400; font-style: italic; }
+.lbl.nucl { fill: var(--nuc); font-weight: 600; }
+.lbl.junl { fill: var(--jun); font-weight: 600; }
+
+svg { background: var(--bg); } svg.flow { min-width: 0; }</style><rect width="1140" height="2056" style="fill: var(--bg)"/><defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="ahp"/></marker></defs><rect class="n pre" x="100" y="20" width="300" height="76" rx="8"/>
+<text class="t" x="250.0" y="47.0">Window</text>
+<text class="s" x="250.0" y="65.0">gui.py · tabs built from config.py</text>
+<text class="s" x="250.0" y="81.0">load / save settings · preview inputs</text>
+<rect class="n pre" x="540" y="20" width="300" height="76" rx="8"/>
+<text class="t" x="690.0" y="47.0">Command line</text>
+<text class="s" x="690.0" y="65.0">python -m cell_analyzer.pipeline</text>
+<text class="s" x="690.0" y="81.0">--config settings.json  or  --input …</text>
+<rect class="n pre" x="100" y="126" width="300" height="76" rx="8"/>
+<text class="t" x="250.0" y="153.0">▶ Run analysis</text>
+<text class="s" x="250.0" y="171.0">settings → temporary JSON → pipeline in</text>
+<text class="s" x="250.0" y="187.0">its own process; progress bar + Run log</text>
+<path class="a" d="M250,96 L250,124" marker-end="url(#ah)"/>
+<path class="a" d="M250,202 L250,217 L470,217 L470,230" marker-end="url(#ah)"/>
+<path class="a nohead" d="M690,96 L690,217 L470,217"/>
+<rect class="n" x="240" y="232" width="460" height="64" rx="8"/>
+<text class="t" x="470.0" y="261.0">Load and check settings</text>
+<text class="s" x="470.0" y="279.0">old pixel-based files → px units · validate · start the log</text>
+<line class="o" x1="700" y1="264" x2="860" y2="264"/>
+<rect class="out" x="860" y="242.0" width="268" height="44" rx="6"/>
+<text class="m" xml:space="preserve" x="872" y="262.0">logs/analysis_log_&lt;time&gt;.json</text>
+<text class="m" xml:space="preserve" x="872" y="277.0">  + .txt + _console.txt</text>
+<path class="a" d="M470,296 L470,324" marker-end="url(#ah)"/>
+<rect class="n" x="240" y="326" width="460" height="76" rx="8"/>
+<text class="t" x="470.0" y="353.0">Find inputs</text>
+<text class="s" x="470.0" y="371.0">.lif plate · folder of .czi / .tif (format + name filters) · single file</text>
+<text class="s" x="470.0" y="387.0">→ list of (file, scene) jobs after scene filters</text>
+<line class="o" x1="700" y1="364" x2="860" y2="364"/>
+<rect class="out" x="860" y="342.0" width="268" height="44" rx="6"/>
+<text class="m" xml:space="preserve" x="872" y="362.0">per_file/&lt;file&gt;/</text>
+<text class="m" xml:space="preserve" x="872" y="377.0">analysis_parameters.json</text>
+<path class="a" d="M470,402 L470,430" marker-end="url(#ah)"/>
+<rect class="n off" x="240" y="432" width="460" height="64" rx="8"/>
+<text class="t" x="470.0" y="461.0"><tspan class="badge">extra</tspan>  Overview pictures</text>
+<text class="s" x="470.0" y="479.0">all channels side by side + merge + scale bar</text>
+<line class="o" x1="700" y1="464" x2="860" y2="464"/>
+<rect class="out" x="860" y="442.0" width="268" height="44" rx="6"/>
+<text class="m" xml:space="preserve" x="872" y="462.0">per_file/&lt;file&gt;/overview/</text>
+<text class="m" xml:space="preserve" x="872" y="477.0">&lt;scene&gt;_overview.png</text>
+<path class="a" d="M470,496 L470,524" marker-end="url(#ah)"/>
+<rect class="n off" x="240" y="526" width="460" height="64" rx="8"/>
+<text class="t" x="470.0" y="555.0"><tspan class="badge">1</tspan>  Background</text>
+<text class="s" x="470.0" y="573.0">average many scenes → illumination field (per_file / pooled / existing)</text>
+<line class="o" x1="700" y1="558" x2="860" y2="558"/>
+<rect class="out" x="860" y="536.0" width="268" height="44" rx="6"/>
+<text class="m" xml:space="preserve" x="872" y="556.0">per_file/&lt;file&gt;/background/*.npy</text>
+<text class="m" xml:space="preserve" x="872" y="571.0">pooled_background/  (pooled mode)</text>
+<path class="a" d="M470,590 L470,618" marker-end="url(#ah)"/>
+<rect class="grp" x="140" y="620" width="660" height="1024" rx="12"/>
+<text class="gt" x="160" y="646"><tspan class="badge">2</tspan>  Segmentation <tspan class="gsub">— per scene</tspan></text>
+<rect class="n" x="240" y="662" width="460" height="56" rx="8"/>
+<text class="t" x="470.0" y="687.0">Load nuclei + junction channel</text>
+<text class="s" x="470.0" y="705.0">max projection over Z · background correction</text>
+<path class="a" d="M470,718 L470,746" marker-end="url(#ah)"/>
+<rect class="n" x="240" y="748" width="460" height="76" rx="8"/>
+<text class="t" x="470.0" y="775.0">Sizes µm → pixels</text>
+<text class="s" x="470.0" y="793.0">pixel size from the file · empty settings follow the typical</text>
+<text class="s" x="470.0" y="809.0">nucleus (10 µm) and cell area (1000 µm²)  —  sizes.py</text>
+<path class="a" d="M470,824 L470,846" marker-end="url(#ah)"/>
+<polygon class="dec" points="470,848 600,884 470,920 340,884"/>
+<text class="t" x="470" y="889">Cells found from?</text>
+<path class="a" d="M340,884 L300,884 L300,958" marker-end="url(#ah)"/>
+<path class="a" d="M600,884 L640,884 L640,958" marker-end="url(#ah)"/>
+<text class="lbl nucl" x="318" y="874" text-anchor="middle">nuclei</text>
+<text class="lbl junl" x="622" y="874" text-anchor="middle">junctions</text>
+<rect class="n nuc" x="160" y="960" width="280" height="76" rx="8"/>
+<text class="t" x="300.0" y="987.0">Find nuclei</text>
+<text class="s" x="300.0" y="1005.0">smooth · Otsu · distance transform</text>
+<text class="s" x="300.0" y="1021.0">watershed splits touching nuclei</text>
+<path class="a" d="M300,1036 L300,1064" marker-end="url(#ah)"/>
+<rect class="n nuc" x="160" y="1066" width="280" height="76" rx="8"/>
+<text class="t" x="300.0" y="1093.0">Confluent?</text>
+<text class="s" x="300.0" y="1111.0">nuclei ≥ threshold (auto: 30 % of fit)</text>
+<text class="s" x="300.0" y="1127.0">no → tissue mask, or as dense / skip</text>
+<path class="a" d="M300,1142 L300,1170" marker-end="url(#ah)"/>
+<rect class="n nuc" x="160" y="1172" width="280" height="64" rx="8"/>
+<text class="t" x="300.0" y="1201.0">Grow cells from nuclei</text>
+<text class="s" x="300.0" y="1219.0">watershed on the junction image</text>
+<path class="a" d="M300,1236 L300,1264" marker-end="url(#ah)"/>
+<rect class="n nuc" x="160" y="1266" width="280" height="76" rx="8"/>
+<text class="t" x="300.0" y="1293.0">Keep 2-nucleus cells together</text>
+<text class="s" x="300.0" y="1311.0">merge neighbours: nuclei close and</text>
+<text class="s" x="300.0" y="1327.0">no junction on the border between</text>
+<rect class="n jun" x="500" y="960" width="280" height="76" rx="8"/>
+<text class="t" x="640.0" y="987.0">Find cell centres</text>
+<text class="s" x="640.0" y="1005.0">strong blur → dark basins (h-minima)</text>
+<text class="s" x="640.0" y="1021.0">on a down-sampled copy</text>
+<path class="a" d="M640,1036 L640,1064" marker-end="url(#ah)"/>
+<rect class="n jun" x="500" y="1066" width="280" height="76" rx="8"/>
+<text class="t" x="640.0" y="1093.0">Grow cells</text>
+<text class="s" x="640.0" y="1111.0">watershed on the junction image</text>
+<text class="s" x="640.0" y="1127.0">confluence checked by cell count</text>
+<path class="a" d="M640,1142 L640,1170" marker-end="url(#ah)"/>
+<rect class="n jun" x="500" y="1172" width="280" height="76" rx="8"/>
+<text class="t" x="640.0" y="1199.0">Merge pieces without junction</text>
+<text class="s" x="640.0" y="1217.0">border weaker than the merge ratio</text>
+<text class="s" x="640.0" y="1233.0">never above the max. cell area</text>
+<path class="a" d="M300,1342 L300,1357 L470,1357 L470,1370" marker-end="url(#ah)"/>
+<path class="a nohead" d="M640,1248 L640,1357 L470,1357"/>
+<rect class="n" x="240" y="1372" width="460" height="64" rx="8"/>
+<text class="t" x="470.0" y="1401.0">Clean up</text>
+<text class="s" x="470.0" y="1419.0">remove cells at the image border and too-small cells · QC picture</text>
+<line class="o" x1="700" y1="1404" x2="860" y2="1404"/>
+<rect class="out" x="860" y="1367.0" width="268" height="74" rx="6"/>
+<text class="m" xml:space="preserve" x="872" y="1387.0">segmentation/ *_cell_labels.tif</text>
+<text class="m" xml:space="preserve" x="872" y="1402.0">  *_segmentation_summary.csv</text>
+<text class="m" xml:space="preserve" x="872" y="1417.0">  *_statistics.csv</text>
+<text class="m" xml:space="preserve" x="872" y="1432.0">segmentation_qc/ *_qc.png</text>
+<path class="a" d="M470,1436 L470,1464" marker-end="url(#ah)"/>
+<rect class="n" x="240" y="1466" width="460" height="64" rx="8"/>
+<text class="t" x="470.0" y="1495.0">Cell contacts (adjacency)</text>
+<text class="s" x="470.0" y="1513.0">touching label pairs · contact length · junction brightness</text>
+<line class="o" x1="700" y1="1498" x2="860" y2="1498"/>
+<rect class="out" x="860" y="1476.0" width="268" height="44" rx="6"/>
+<text class="m" xml:space="preserve" x="872" y="1496.0">adjacency/ *_cell_adjacency.csv</text>
+<text class="m" xml:space="preserve" x="872" y="1511.0">  &lt;scene&gt;_adjacency_matrix.npz</text>
+<path class="a" d="M470,1530 L470,1558" marker-end="url(#ah)"/>
+<rect class="n" x="240" y="1560" width="460" height="64" rx="8"/>
+<text class="t" x="470.0" y="1589.0">Size statistics (all scenes)</text>
+<text class="s" x="470.0" y="1607.0">medians vs. current settings, suggested values — diagnostics.py</text>
+<line class="o" x1="700" y1="1592" x2="860" y2="1592"/>
+<rect class="out" x="860" y="1570.0" width="268" height="44" rx="6"/>
+<text class="m" xml:space="preserve" x="872" y="1590.0">results/size_statistics/</text>
+<text class="m" xml:space="preserve" x="872" y="1605.0">  *_size_statistics.png + summary.csv</text>
+<path class="a" d="M470,1644 L470,1672" marker-end="url(#ah)"/>
+<rect class="n" x="240" y="1674" width="460" height="76" rx="8"/>
+<text class="t" x="470.0" y="1701.0"><tspan class="badge">3</tspan>  Measurement</text>
+<text class="s" x="470.0" y="1719.0">shape · intensity per channel in cell, nucleus and border ring</text>
+<text class="s" x="470.0" y="1735.0">well ID · n_nuclei · n_neighbours  — per scene</text>
+<line class="o" x1="700" y1="1712" x2="860" y2="1712"/>
+<rect class="out" x="860" y="1690.0" width="268" height="44" rx="6"/>
+<text class="m" xml:space="preserve" x="872" y="1710.0">per_file/&lt;file&gt;/measurements/</text>
+<text class="m" xml:space="preserve" x="872" y="1725.0">  *_cell_measurements.csv + .pkl</text>
+<path class="a" d="M470,1750 L470,1778" marker-end="url(#ah)"/>
+<rect class="n" x="240" y="1780" width="460" height="76" rx="8"/>
+<text class="t" x="470.0" y="1807.0"><tspan class="badge">4</tspan>  Aggregation</text>
+<text class="s" x="470.0" y="1825.0">all files → one table · newest rescan per plate</text>
+<text class="s" x="470.0" y="1841.0">plate map · Z-scores against the controls</text>
+<line class="o" x1="700" y1="1818" x2="860" y2="1818"/>
+<rect class="out" x="860" y="1796.0" width="268" height="44" rx="6"/>
+<text class="m" xml:space="preserve" x="872" y="1816.0">results/</text>
+<text class="m" xml:space="preserve" x="872" y="1831.0">aggregated_cell_measurements.csv</text>
+<path class="a" d="M470,1856 L470,1884" marker-end="url(#ah)"/>
+<rect class="n" x="240" y="1886" width="460" height="76" rx="8"/>
+<text class="t" x="470.0" y="1913.0"><tspan class="badge">5</tspan>  Analysis plots</text>
+<text class="s" x="470.0" y="1931.0">per condition: violin, box, replicates, ECDF, heatmaps</text>
+<text class="s" x="470.0" y="1947.0">statistics: Welch test on replicates, BH-corrected</text>
+<line class="o" x1="700" y1="1924" x2="860" y2="1924"/>
+<rect class="out" x="860" y="1902.0" width="268" height="44" rx="6"/>
+<text class="m" xml:space="preserve" x="872" y="1922.0">results/plots/index.html</text>
+<text class="m" xml:space="preserve" x="872" y="1937.0">  by_&lt;group&gt;/ + plate_heatmaps/</text>
+<path class="a" d="M470,1962 L470,1990" marker-end="url(#ah)"/>
+<rect class="end" x="290" y="1992" width="360" height="44" rx="22"/>
+<text class="t" x="470" y="2019">Done · log closed (status, counts, errors)</text>
+<path class="br" d="M126,436 L114,436 L114,1746 L126,1746"/>
+<text class="lbl dim" transform="translate(104 1091) rotate(-90)" text-anchor="middle">stages run scene by scene in parallel worker processes</text></svg>

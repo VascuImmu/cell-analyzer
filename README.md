@@ -6,11 +6,9 @@ Cell Analyzer segments nuclei and cells in microscopy images (`.lif`, `.czi`, `.
 
 ## Download
 
-Replace `VascuImmu/cell-analyzer` below with this repository's address on GitHub.
-
 **Without git (easiest):**
 
-1. Open the repository page on GitHub: `https://github.com/VascuImmu/cell-analyzer`
+1. Open the repository page on GitHub: [github.com/VascuImmu/cell-analyzer](https://github.com/VascuImmu/cell-analyzer)
 2. Click the green **Code** button, then **Download ZIP**.
 3. Unzip the file. The folder is called `cell-analyzer-main`; you can rename it to `cell-analyzer`.
 4. Move the folder somewhere permanent on your own computer, for example `Documents/cell-analyzer`. Don't keep it on a network drive or in a synced folder, because that can break the start files.
@@ -18,7 +16,7 @@ Replace `VascuImmu/cell-analyzer` below with this repository's address on GitHub
 **With git:**
 
 ```bash
-git clone https://github.com/<USER>/<REPO>.git cell-analyzer
+git clone https://github.com/VascuImmu/cell-analyzer.git cell-analyzer
 cd cell-analyzer
 ```
 
@@ -44,6 +42,18 @@ What the installer does on each system:
 
 The start files look for the environment in every usual Miniforge, Miniconda or Anaconda location. They also still accept the environment name `cellpipeline` used before the rename.
 
+## How a run works
+
+![Flowchart of a Cell Analyzer run](docs/flowchart.svg)
+
+A run starts from the window or the command line, checks the settings, finds the files and scenes, and then runs the stages in order. Each stage has its own switch on the Stages & Channels tab:
+
+- Boxes with dashed borders are stages that are off by default (overview pictures, background).
+- Inside segmentation, the blue path is used when there is a nuclei channel and the purple path when cells are found from the junctions alone. Both paths continue with clean-up, cell contacts and size statistics.
+- Grey dotted boxes are the files each step writes.
+
+The overview pictures, background, segmentation and measurement stages run scene by scene in parallel worker processes. The picture follows your light or dark mode; open `docs/flowchart.svg` in a browser to see it full size.
+
 ## Folder structure
 
 ```
@@ -54,6 +64,7 @@ cell-analyzer/
 ├── start_mac.command         start the window               (Windows: start_windows.bat,   Linux: start_linux.sh)
 ├── Cell Analyzer.app         created by install_mac.command
 ├── environment.yml           the conda environment (conda-forge only)
+├── docs/flowchart.svg        the flowchart shown above
 ├── tools/
 │   ├── find_conda.sh         used by the macOS/Linux scripts: finds conda and the environment
 │   └── check_env.py          used by the installers: checks that every package loads
