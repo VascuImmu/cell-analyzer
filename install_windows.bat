@@ -15,6 +15,17 @@ if not defined CONDA_BAT (
     exit /b 1
 )
 echo Using %CONDA_BAT%
+for %%R in ("%CONDA_BAT%\..\..") do set "CONDA_ROOT=%%~fR"
+
+REM Miniforge 26.9.4 bug: environments cannot be created ("Could not find share/conda-launchers/cli-64.exe").
+REM Repair the base installation once by reinstalling the package 'conda-launchers'.
+if exist "%CONDA_ROOT%\python.exe" (
+    "%CONDA_ROOT%\python.exe" tools\check_conda_launchers.py "%CONDA_ROOT%"
+    if errorlevel 1 (
+        echo   repairing conda: reinstalling conda-launchers in the base installation...
+        call "%CONDA_BAT%" install -n base -y --force-reinstall conda-launchers
+    )
+)
 echo Installing / updating the 'cell-analyzer' environment. This takes 5-15 minutes the first time...
 
 call :findpy
@@ -27,7 +38,7 @@ set "EXISTED=%PY%"
 if defined PY (
     call "%CONDA_BAT%" env update -n %ENVNAME% -f environment.yml --prune
 ) else (
-    call "%CONDA_BAT%" env create -y -f environment.yml || call "%CONDA_BAT%" env create -f environment.yml
+    call "%CONDA_BAT%" env create -y -f environment.yml || call :repair_and_create
 )
 
 echo   checking the environment...
@@ -40,7 +51,7 @@ call :activate
 if not defined EXISTED goto :failed
 echo   The existing environment is damaged - rebuilding it from scratch ^(5-15 min^)...
 call "%CONDA_BAT%" env remove -y -n %ENVNAME%
-call "%CONDA_BAT%" env create -y -f environment.yml || call "%CONDA_BAT%" env create -f environment.yml
+call "%CONDA_BAT%" env create -y -f environment.yml || call :repair_and_create
 call :findpy
 if not defined PY goto :failed
 call :activate
@@ -57,6 +68,14 @@ echo.
 echo   Done. You can now start the program with start_windows.bat
 pause
 exit /b 0
+
+:repair_and_create
+REM environment creation failed: repair conda-launchers (see above) unconditionally and try once more
+echo   creating the environment failed - repairing conda and trying again...
+call "%CONDA_BAT%" install -n base -y --force-reinstall conda-launchers
+call "%CONDA_BAT%" env remove -y -n %ENVNAME% >nul 2>&1
+call "%CONDA_BAT%" env create -y -f environment.yml
+exit /b %errorlevel%
 
 :findpy
 REM sets PY (python.exe) and ENVDIR of the 'cell-analyzer' environment (or %ENVNAME%), searching every usual conda installation

@@ -40,6 +40,7 @@ TABS = [
     ("Background", ["Background"]),
     ("Segmentation", ["Segmentation"]),
     ("Non-confluent", ["Non-confluent"]),
+    ("Time series", ["Time series"]),
     ("Measurement", ["Measurement"]),
     ("Overview pictures", ["Overview"]),
     ("Aggregation", ["Aggregation"]),
@@ -426,7 +427,7 @@ class CellAnalyzerGUI(tk.Tk):
             w = ttk.Combobox(cell, textvariable=var, values=f["choices"], state="readonly", width=18)
             w.pack(side="left")
             widgets.append(w)
-        elif t in ("dir", "file_open", "file_save", "channel_paths", "path_in"):
+        elif t in ("dir", "file_open", "file_save", "channel_paths", "path_in", "image_open"):
             w = ttk.Entry(cell, textvariable=var, width=44)
             w.pack(side="left")
             widgets.append(w)
@@ -434,6 +435,8 @@ class CellAnalyzerGUI(tk.Tk):
                 cmd = lambda v=var: self._browse_dir(v)
             elif t == "file_open":
                 cmd = lambda v=var: self._browse_open(v, [("Excel", "*.xlsx *.xls"), ("All files", "*")])
+            elif t == "image_open":
+                cmd = lambda v=var: self._browse_open(v, self._image_filetypes())
             elif t == "file_save":
                 cmd = lambda v=var: self._browse_save(v)
             elif t == "channel_paths":
@@ -533,11 +536,15 @@ class CellAnalyzerGUI(tk.Tk):
         cur[ch] = f
         var.set("; ".join(f"{k}={v}" for k, v in sorted(cur.items())))
 
-    def _pick_file(self):
+    @staticmethod
+    def _image_filetypes():
         # macOS aborts the whole program (NSException) on file types with two dots such as "*.ome.tif",
         # so only the last part of each extension is offered (".tif" already covers ".ome.tif").
         exts = sorted({"*." + e.rsplit(".", 1)[-1] for es in pc.SUPPORTED_FORMATS.values() for e in es})
-        f = filedialog.askopenfilename(filetypes=[("Images", " ".join(exts)), ("All files", "*")])
+        return [("Images", " ".join(exts)), ("All files", "*")]
+
+    def _pick_file(self):
+        f = filedialog.askopenfilename(filetypes=self._image_filetypes())
         if f:
             from .io_utils import format_of
             self.vars["input_path"].set(f)
@@ -754,7 +761,13 @@ class CellAnalyzerGUI(tk.Tk):
         nc = (f"enabled (< {cfg['min_nuclei_confluent']} nuclei → '{cfg['foreground_mask']}' mask)"
               if cfg["nonconfluent_enabled"] else f"disabled (sparse scenes: {cfg['sparse_policy']})")
         msg = (f"Input:  {cfg['input_path']}\nOutput: {cfg['output_root']}\n\nStages: {', '.join(stages) or 'none'}\n"
-               f"Background: {cfg['background_mode']}\nNon-confluent analysis: {nc}\n\nStart the analysis?")
+               f"Background: {cfg['background_mode']}"
+               + (f" ({cfg['background_image_type']} from {Path(cfg['background_image_path']).name})"
+                  if cfg["background_mode"] == "image" else "")
+               + f"\nNon-confluent analysis: {nc}\n"
+               + (f"Time series: timepoints {cfg['timepoints'] or 'all'}"
+                  + (", cells tracked" if cfg["track_cells"] else "") + "\n" if cfg["time_mode"] == "series" else "")
+               + "\nStart the analysis?")
         if not messagebox.askyesno("Run analysis", msg):
             return
         self._save_last()

@@ -39,7 +39,7 @@ import tifffile
 from scipy.ndimage import gaussian_filter1d, binary_erosion
 from skimage.measure import regionprops, find_contours
 
-from .flatfield import load_and_normalize_background, apply_flatfield_correction
+from .flatfield import load_correction, correct_image
 from ..io_utils import load_mip_stack, scene_stem, parse_well
 
 DEFAULT_MEAS_PARAMS = dict(
@@ -110,25 +110,29 @@ def _parse_names(v):
 # -------------------------------------------------
 # Per-scene worker
 # -------------------------------------------------
-def measure_scene(file_str, scene, dataset_stem, seg_dir_str, p, background_paths=None, scene_info=None):
+def measure_scene(file_str, scene, dataset_stem, seg_dir_str, p, background_paths=None, scene_info=None,
+                  timepoint=None, frame_interval_min=None):
+    """timepoint None = single-timepoint mode (p['timepoint']); a number = one frame of a time series."""
     p = {**DEFAULT_MEAS_PARAMS, **p}
     seg_dir = Path(seg_dir_str)
-    stem = scene_stem(dataset_stem, scene)
+    stem = scene_stem(dataset_stem, scene, timepoint)
+    t_load = p["timepoint"] if timepoint is None else int(timepoint)
+    where = scene if timepoint is None else f"{scene} t={t_load}"
     cell_path = seg_dir / f"{stem}_cell_labels.tif"
     nuclei_path = seg_dir / f"{stem}_nuclei_labels.tif"
     scene_info = scene_info or {}
 
     if not cell_path.exists():
         why = " (skipped as non-confluent)" if scene_info.get("status") == "skipped_sparse" else ""
-        return [], {}, f"↷ No cell labels for {scene}{why}"
+        return [], {}, f"↷ No cell labels for {where}{why}"
 
     cell_labels = tifffile.imread(cell_path)
     if cell_labels.ndim != 2:
-        return [], {}, f"✗ {scene}: labels are not 2D {cell_labels.shape}; use segmentation mode 'mip'."
+        return [], {}, f"✗ {where}: labels are not 2D {cell_labels.shape}; use segmentation mode 'mip'."
 
     nuclei_labels = tifffile.imread(nuclei_path) if (p["measure_nuclei"] and nuclei_path.exists()) else None
 
-    stack, pixel_size, file_ch_names = load_mip_stack(file_str, scene, p["timepoint"])
+    stack, pixel_size, file_ch_names = load_mip_stack(file_str, scene, t_load)
     if p["pixel_size_um"]:
         pixel_size = float(p["pixel_size_um"])
     px = pixel_size if pixel_size else np.nan
@@ -145,7 +149,7 @@ def measure_scene(file_str, scene, dataset_stem, seg_dir_str, p, background_path
 
     for ch, path in (background_paths or {}).items():
         if path and int(ch) < n_channels:
-            stack[int(ch)] = apply_flatfield_correction(stack[int(ch)], load_and_normalize_background(path))
+            stack[int(ch)] = correct_image(stack[int(ch)], load_correction(path))
 
     well_row, well_col = parse_well(scene, Path(file_str).name, p["well_regex"], p["well_regex_fallback"])
     well_id = f"{well_row}{well_col}" if well_row else None
@@ -167,6 +171,8 @@ def measure_scene(file_str, scene, dataset_stem, seg_dir_str, p, background_path
             "dataset": dataset_stem,
             "file": Path(file_str).name,
             "scene": scene,
+            "timepoint": t_load,
+            "time_min": t_load * frame_interval_min if frame_interval_min else np.nan,
             "well_row": well_row,
             "well_column": well_col,
             "well_id": well_id,
@@ -231,13 +237,18 @@ def measure_scene(file_str, scene, dataset_stem, seg_dir_str, p, background_path
         rows.append(row)
         extras[lid] = cell_extra
 
-    return rows, extras, f"✓ Measured {len(rows)} cells: {scene}"
+    return rows, extras, f"✓ Measured {len(rows)} cells: {where}"
 
 
-def save_measurements(rows, extras_by_scene, out_dir, dataset_stem, save_pickle=True):
+def save_measurements(rows, extras_by_scene, out_dir, dataset_stem, save_pickle=True, tracking_dir=None):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows)
+    if len(df):
+        df = df.sort_values(["scene", "timepoint", "cell_id"], kind="stable").reset_index(drop=True)
+    if tracking_dir is not None:
+        from .tracking import add_tracks_to_measurements
+        df = add_tracks_to_measurements(df, tracking_dir, dataset_stem)
     csv_path = out_dir / f"{dataset_stem}_cell_measurements.csv"
     df.to_csv(csv_path, index=False)
     print(f"✓ Saved {csv_path} ({len(df):,} cells)", flush=True)
@@ -249,35 +260,47 @@ def save_measurements(rows, extras_by_scene, out_dir, dataset_stem, save_pickle=
     return csv_path
 
 
-def load_scene_info(seg_dir, dataset_stem, adj_dir=None):
+def load_scene_info(seg_dir, dataset_stem, adj_dir=None, series=False):
+    """Per-scene information from the segmentation, keyed by scene -- or by (scene, timepoint) when
+    series=True (time-series mode)."""
     path = Path(seg_dir) / f"{dataset_stem}_segmentation_summary.csv"
     if not path.exists():
         return {}
     df = pd.read_csv(path)
-    info = {r["scene"]: {"confluent": r.get("confluent"), "n_nuclei": r.get("n_nuclei"), "status": r.get("status"),
-                         "seed_source": r.get("seed_source")}
+
+    def key(scene, t):
+        return (scene, int(t)) if series else scene
+
+    def tcol(d):
+        return d["timepoint"] if "timepoint" in d else pd.Series(0, index=d.index)
+
+    info = {key(r["scene"], r.get("timepoint", 0) if r.get("timepoint", 0) == r.get("timepoint", 0) else 0):
+            {"confluent": r.get("confluent"), "n_nuclei": r.get("n_nuclei"), "status": r.get("status"),
+             "seed_source": r.get("seed_source")}
             for r in df.to_dict("records")}
     # touching neighbours per cell (contact-based adjacency written by the segmentation)
     adj = Path(adj_dir) / f"{dataset_stem}_cell_adjacency.csv" if adj_dir else None
     if adj is not None and adj.exists():
         try:
-            a = pd.read_csv(adj, usecols=["scene", "cell_id_a", "cell_id_b", "contact_px"])
-            both = pd.concat([a.rename(columns={"cell_id_a": "cell"})[["scene", "cell", "contact_px"]],
-                              a.rename(columns={"cell_id_b": "cell"})[["scene", "cell", "contact_px"]]])
-            agg = both.groupby(["scene", "cell"])["contact_px"].agg(["size", "sum"])
-            for scene in info:
-                info[scene]["neighbours"] = {}
-            for (scene, cell), row in agg.iterrows():
-                info.setdefault(scene, {}).setdefault("neighbours", {})[int(cell)] = (int(row["size"]), float(row["sum"]))
+            a = pd.read_csv(adj)
+            a["timepoint"] = tcol(a).fillna(0).astype(int)
+            both = pd.concat([a.rename(columns={"cell_id_a": "cell"})[["scene", "timepoint", "cell", "contact_px"]],
+                              a.rename(columns={"cell_id_b": "cell"})[["scene", "timepoint", "cell", "contact_px"]]])
+            agg = both.groupby(["scene", "timepoint", "cell"])["contact_px"].agg(["size", "sum"])
+            for k in info:
+                info[k]["neighbours"] = {}
+            for (scene, t, cell), row in agg.iterrows():
+                info.setdefault(key(scene, t), {}).setdefault("neighbours", {})[int(cell)] = (int(row["size"]), float(row["sum"]))
         except Exception:
             pass
     # nuclei per cell (multi-nucleated cells that the segmentation kept together)
     cs = Path(seg_dir) / f"{dataset_stem}_cell_statistics.csv"
     if cs.exists():
         try:
-            c = pd.read_csv(cs, usecols=["scene", "label_id", "n_nuclei"])
-            for scene, g in c[c["n_nuclei"] > 1].groupby("scene"):
-                info.setdefault(scene, {})["nuclei_per_cell"] = dict(zip(g["label_id"].astype(int), g["n_nuclei"].astype(int)))
+            c = pd.read_csv(cs)
+            c["timepoint"] = tcol(c).fillna(0).astype(int)
+            for (scene, t), g in c[c["n_nuclei"] > 1].groupby(["scene", "timepoint"]):
+                info.setdefault(key(scene, t), {})["nuclei_per_cell"] = dict(zip(g["label_id"].astype(int), g["n_nuclei"].astype(int)))
         except Exception:
             pass
     return info

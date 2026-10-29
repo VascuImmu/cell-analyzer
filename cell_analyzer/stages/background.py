@@ -181,6 +181,144 @@ def _plot_background_diagnostics(mean_field, background_field, flatfield, save_p
 
 
 # -------------------------------------------------
+# Corrections from reference images recorded on the microscope (background mode 'image')
+# -------------------------------------------------
+def _mean_projection(path, scenes, channel, downsample, z_projection):
+    # runs in the main process: dask's thread pool must not be started here, otherwise the worker
+    # processes forked later (Linux) can inherit a held lock and hang
+    import dask
+    with dask.config.set(scheduler="synchronous"):
+        projs = [get_channel_projection(str(path), s, channel, downsample, z_projection, 0) for s in scenes]
+    h = min(p.shape[0] for p in projs)
+    w = min(p.shape[1] for p in projs)
+    return np.mean([p[:h, :w] for p in projs], axis=0).astype(np.float32)
+
+
+def _pick_scenes(path, include):
+    from ..io_utils import name_matches
+    from ..config import parse_str_list
+    scenes = list_scenes(path)
+    inc = parse_str_list(include)
+    if inc:
+        scenes = [s for s in scenes if name_matches(s, inc, [], False, False)]
+    if not scenes:
+        raise ValueError(f"{Path(path).name}: no scene matches {inc}")
+    return scenes
+
+
+def fields_from_reference_image(ref_path, channels, out_dir, kind="flatfield", channel_map=None,
+                                scene_include="", dark_path=None, offset=0.0, downsample=4,
+                                z_projection="max", smooth_sigma=50.0):
+    """
+    Build one correction per data channel from a reference image recorded on the microscope.
+
+    kind 'flatfield': field = smoothed (reference - dark or offset); images are divided by it (mean 1).
+    kind 'blank'    : field = smoothed reference; it is subtracted from the images.
+    All scenes of the reference (optionally filtered) are averaged. Returns {data_channel: npy_path}.
+    """
+    from .flatfield import save_correction
+    from ..io_utils import file_stem, acquisition_info
+    ref_path = Path(ref_path)
+    channel_map = channel_map or {}
+    scenes = _pick_scenes(ref_path, scene_include)
+    n_c = acquisition_info(ref_path, scenes[0])["n_channels"]
+    dark_scenes = _pick_scenes(dark_path, "") if dark_path else None
+    dark_nc = acquisition_info(dark_path, dark_scenes[0])["n_channels"] if dark_path else 0
+    out_dir = Path(out_dir)
+    stem = file_stem(ref_path)
+    print(f"Reference {ref_path.name}: {len(scenes)} scene(s) averaged, used as {kind}"
+          + ((f", dark image {Path(dark_path).name}" if dark_path else (f", camera offset {offset:g}" if offset else ""))
+             if kind == "flatfield" else ""),
+          flush=True)
+    got = {}
+    shown = False
+    for ch in channels:
+        rc = channel_map.get(ch, ch)
+        if rc >= n_c:
+            raise ValueError(f"data channel {ch} -> reference channel {rc}, but the reference has only {n_c} "
+                             f"channel(s) (counting from 0). Set 'Channel mapping'.")
+        mean = _mean_projection(ref_path, scenes, rc, downsample, z_projection)
+        npy = out_dir / f"{stem}_ch{ch}_{kind}.npy"
+        # A reference of a uniform sample only needs its noise removed, not the illumination pattern:
+        # never smooth more than 3 % of the image width (the setting is meant for estimates from cells).
+        sigma = float(min(smooth_sigma, max(1.0, 0.03 * max(mean.shape))))
+        if not shown and sigma < smooth_sigma:
+            print(f"  smoothing the reference with sigma {sigma:.1f} (downsampled px) instead of {smooth_sigma:g} "
+                  f"-- 3 % of its width", flush=True)
+            shown = True
+        dark = None
+        if kind == "flatfield":
+            if dark_path:
+                dark = _mean_projection(dark_path, dark_scenes, rc if rc < dark_nc else 0, downsample, z_projection)
+                h, w = min(dark.shape[0], mean.shape[0]), min(dark.shape[1], mean.shape[1])
+                dark, mean = gaussian_filter(dark[:h, :w], 2), mean[:h, :w]
+                signal = mean - dark
+            else:
+                signal = mean - float(offset or 0)
+            field = gaussian_filter(signal, sigma=sigma).astype(np.float32)
+            if field.min() <= 0:
+                raise ValueError(f"reference channel {rc}: after subtracting the offset/dark image the field is "
+                                 f"not positive everywhere -- is this really a uniformly bright sample, and is the "
+                                 f"offset too high?")
+            norm = field / field.mean()
+            save_correction(npy, field, "divide", offset=None if dark is not None else offset, dark=dark,
+                            info=dict(reference=str(ref_path), reference_channel=rc, scenes=len(scenes)))
+            print(f"  ✓ ch{ch} (reference ch{rc}): illumination {100 * norm.min():.0f} % … {100 * norm.max():.0f} % "
+                  f"of the mean -> {npy.name}", flush=True)
+            _plot_background_diagnostics(mean, field, norm, out_dir / f"{stem}_ch{ch}_{kind}.png")
+        else:
+            field = gaussian_filter(mean, sigma=sigma).astype(np.float32)
+            save_correction(npy, field, "subtract",
+                            info=dict(reference=str(ref_path), reference_channel=rc, scenes=len(scenes)))
+            print(f"  ✓ ch{ch} (reference ch{rc}): blank level {field.min():.0f} … {field.max():.0f} grey values "
+                  f"(subtracted) -> {npy.name}", flush=True)
+            _plot_background_diagnostics(mean, field, field / field.mean(), out_dir / f"{stem}_ch{ch}_{kind}.png")
+        got[ch] = str(npy)
+    return got
+
+
+def compare_acquisition(ref, img, rel_tol=0.02):
+    """
+    Compare acquisition_info() of the reference with that of an input image.
+    Returns a list of (level, text); level 'error' = the reference does not fit, 'warning' = check it.
+    """
+    out = []
+    ro, io = ref.get("objective") or {}, img.get("objective") or {}
+    if ro and io:
+        if ro.get("magnification") and io.get("magnification") and abs(ro["magnification"] - io["magnification"]) > 0.01:
+            out.append(("error", f"objective magnification {ro['magnification']:g}x (reference) vs {io['magnification']:g}x"))
+        if ro.get("na") and io.get("na") and abs(ro["na"] - io["na"]) > 0.005:
+            out.append(("error", f"objective NA {ro['na']:g} (reference) vs {io['na']:g}"))
+        if ro.get("name") and io.get("name") and str(ro["name"]).strip() != str(io["name"]).strip():
+            out.append(("warning", f"objective '{ro['name']}' (reference) vs '{io['name']}'"))
+    elif ro or io:
+        out.append(("warning", "objective information is only stored in one of the two files"))
+    else:
+        out.append(("info", "no objective information in either file"))
+    rp, ip = ref.get("pixel_size_um"), img.get("pixel_size_um")
+    if rp and ip:
+        if abs(rp - ip) / ip > rel_tol:
+            out.append(("error", f"pixel size {rp:.4g} µm (reference) vs {ip:.4g} µm"))
+    else:
+        out.append(("warning", "pixel size missing in " + ("the reference" if not rp else "the image")))
+    rf, imf = ref.get("field_of_view_um"), img.get("field_of_view_um")
+    if rf and imf:
+        if any(abs(a - b) / b > rel_tol for a, b in zip(rf, imf)):
+            out.append(("error", f"field of view {rf[1]:.0f} × {rf[0]:.0f} µm (reference) vs {imf[1]:.0f} × {imf[0]:.0f} µm "
+                                 f"-- the illumination pattern cannot be mapped onto the images"))
+    elif tuple(ref["shape"]) != tuple(img["shape"]):
+        out.append(("error", f"image size {ref['shape'][1]} × {ref['shape'][0]} px (reference) vs "
+                             f"{img['shape'][1]} × {img['shape'][0]} px"))
+    if tuple(ref["shape"]) != tuple(img["shape"]) and not any(l == "error" and "field of view" in t for l, t in out):
+        out.append(("info", f"image size differs ({ref['shape'][1]} × {ref['shape'][0]} vs {img['shape'][1]} × "
+                            f"{img['shape'][0]} px, e.g. binning) -- the field is rescaled"))
+    rn, inn = ref.get("channel_names") or [], img.get("channel_names") or []
+    if rn and inn and rn != inn:
+        out.append(("warning", f"channel names differ: {rn} (reference) vs {inn} -- check 'Channel mapping'"))
+    return out
+
+
+# -------------------------------------------------
 # CLI (single file)
 # -------------------------------------------------
 if __name__ == "__main__":

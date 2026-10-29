@@ -65,8 +65,10 @@ def safe_name(text):
     return re.sub(r'[\\/:*?"<>|]', "_", str(text))
 
 
-def scene_stem(dataset_stem, scene):
-    return f"{dataset_stem}_{safe_name(scene)}"
+def scene_stem(dataset_stem, scene, timepoint=None):
+    """File-name stem of one scene; with a timepoint (time-series mode) '_t0003' is appended."""
+    base = f"{dataset_stem}_{safe_name(scene)}"
+    return base if timepoint is None else f"{base}_t{int(timepoint):04d}"
 
 
 # -------------------------------------------------
@@ -292,3 +294,151 @@ def parse_well(scene, filename, well_regex, fallback=True):
             if m:
                 return m.group("row").upper(), str(int(m.group("col")))
     return None, None
+
+
+# -------------------------------------------------
+# Time series
+# -------------------------------------------------
+def n_timepoints(path, scene=None):
+    img = open_image(path)
+    if scene is not None:
+        img.set_scene(scene)
+    return int(img.dims.T)
+
+
+def frame_interval_min(path, scene=None):
+    """Time between frames in minutes from the file's metadata, or None if it is not stored / not readable."""
+    try:
+        img = open_image(path)
+        if scene is not None:
+            img.set_scene(scene)
+        md = img.metadata
+    except Exception:
+        return None
+    # OME (ome.tif): Pixels.TimeIncrement
+    try:
+        px = md.images[0].pixels
+        if px.time_increment:
+            unit = str(getattr(px, "time_increment_unit", "s") or "s").split(".")[-1].lower()
+            f = {"s": 1 / 60, "second": 1 / 60, "ms": 1 / 60000, "millisecond": 1 / 60000,
+                 "min": 1.0, "minute": 1.0, "h": 60.0, "hour": 60.0}.get(unit, 1 / 60)
+            return float(px.time_increment) * f
+    except Exception:
+        pass
+    root = _xml_root(md)
+    if root is None:
+        return None
+    # Zeiss .czi: <Interval><TimeSpan><Value>5</Value><DefaultUnitFormat>min</DefaultUnitFormat>
+    for ts in root.iter("TimeSpan"):
+        try:
+            v = float(ts.findtext("Value"))
+            unit = (ts.findtext("DefaultUnitFormat") or "s").strip().lower()
+            f = {"ms": 1 / 60000, "s": 1 / 60, "min": 1.0, "h": 60.0}.get(unit, 1 / 60)
+            if v > 0:
+                return v * f
+        except Exception:
+            continue
+    # Leica .lif: <DimensionDescription DimID="4" NumberOfElements="n" Length="total" Unit="s">
+    for dd in root.iter("DimensionDescription"):
+        if dd.get("DimID") == "4":
+            try:
+                n, length = int(dd.get("NumberOfElements")), float(dd.get("Length"))
+                unit = (dd.get("Unit") or "s").lower()
+                f = {"ms": 1 / 60000, "s": 1 / 60, "min": 1.0, "h": 60.0}.get(unit, 1 / 60)
+                if n > 1 and length > 0:
+                    return length / (n - 1) * f
+            except Exception:
+                continue
+    return None
+
+
+# -------------------------------------------------
+# Acquisition metadata (for checking a background reference against the images)
+# -------------------------------------------------
+def _xml_root(md):
+    """The metadata as an ElementTree element if it is XML (.czi, .lif), else None."""
+    try:
+        import xml.etree.ElementTree as ET
+        if isinstance(md, (str, bytes)):
+            return ET.fromstring(md)
+        if hasattr(md, "iter") and hasattr(md, "tag"):
+            return md
+        if hasattr(md, "getroot"):
+            return md.getroot()
+    except Exception:
+        pass
+    return None
+
+
+def _num(v):
+    try:
+        return float(str(v).lower().replace("x", "").strip())
+    except Exception:
+        return None
+
+
+def _objective_from_xml(root, scene=None):
+    """Objective name / magnification / NA from Zeiss (.czi) or Leica (.lif) XML metadata."""
+    found = []
+    # Leica: attributes on the confocal / camera setting elements
+    search_root = root
+    if scene:
+        last = str(scene).split("/")[-1]
+        for el in root.iter("Element"):
+            if el.get("Name") == last:
+                search_root = el
+                break
+    for el in search_root.iter():
+        if el.get("ObjectiveName"):
+            found.append(dict(name=el.get("ObjectiveName"), magnification=_num(el.get("Magnification")),
+                              na=_num(el.get("NumericalAperture")), immersion=el.get("Immersion")))
+            break
+    if found:
+        return found[0]
+    # Zeiss: Metadata/Information/Instrument/Objectives/Objective
+    for ob in root.iter("Objective"):
+        name = ob.get("Name") or ob.findtext("Manufacturer/Model") or ob.findtext("Name")
+        mag = _num(ob.findtext("NominalMagnification"))
+        na = _num(ob.findtext("LensNA"))
+        if name or mag or na:
+            return dict(name=name, magnification=mag, na=na, immersion=ob.findtext("Immersion"))
+    return {}
+
+
+def acquisition_info(path, scene=None):
+    """
+    What is known about how a scene was recorded:
+      pixel_size_um, shape (Y, X), field_of_view_um (Y, X), n_channels, channel_names,
+      objective {name, magnification, na, immersion}, n_timepoints, n_z
+    Missing information is None. Never raises for missing metadata.
+    """
+    img = open_image(path)
+    if scene is not None:
+        img.set_scene(scene)
+    ps = _pixel_size(img)
+    shape = (int(img.dims.Y), int(img.dims.X))
+    info = dict(file=Path(path).name, scene=scene, pixel_size_um=ps, shape=shape,
+                field_of_view_um=(shape[0] * ps, shape[1] * ps) if ps else None,
+                n_channels=int(img.dims.C), channel_names=[str(c) for c in (img.channel_names or [])],
+                n_timepoints=int(img.dims.T), n_z=int(img.dims.Z), objective={})
+    md = None
+    try:
+        md = img.metadata
+    except Exception:
+        pass
+    try:   # OME metadata (ome.tif; also converted .czi in some reader versions)
+        inst = md.instruments[0] if md is not None and getattr(md, "instruments", None) else None
+        if inst is not None and inst.objectives:
+            ob = inst.objectives[0]
+            info["objective"] = dict(name=ob.model or ob.id, magnification=ob.nominal_magnification,
+                                     na=ob.lens_na, immersion=str(ob.immersion.value) if ob.immersion else None)
+    except Exception:
+        pass
+    if not info["objective"]:
+        root = _xml_root(md)
+        if root is not None:
+            try:
+                info["objective"] = _objective_from_xml(root, scene)
+            except Exception:
+                pass
+    return info

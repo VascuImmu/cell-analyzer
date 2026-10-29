@@ -17,7 +17,8 @@ Field types
   str_list    -- comma-separated strings         ("_merged, stitched")
   path_in     -- input file OR folder
   dir         -- folder
-  file_open   -- existing file
+  file_open   -- existing file (spreadsheet)
+  image_open  -- existing image file (.lif/.czi/.tif/...)
   file_save   -- file to be written
   channel_paths -- "0=/path/a.npy; 1=/path/b.npy"
 """
@@ -27,7 +28,7 @@ from copy import deepcopy
 from pathlib import Path
 
 APP_NAME = "Cell Analyzer"
-PIPELINE_VERSION = "3.2"
+PIPELINE_VERSION = "3.3"
 
 # format key -> file extensions (lower case)
 SUPPORTED_FORMATS = {
@@ -93,13 +94,15 @@ PARAM_SCHEMA = [
         F("measurements_subdir", "measurements", "str", "Per file: measurements"),
         F("adjacency_subdir", "adjacency", "str", "Per file: cell contacts (adjacency)"),
         F("overview_subdir", "overview", "str", "Per file: overview pictures"),
+        F("tracking_subdir", "tracking", "str", "Per file: cell tracks (time series)"),
         F("write_dataset_params", True, "bool", "Copy parameters into every dataset folder",
           "Writes <dataset>/analysis_parameters.json so each result folder is self-describing."),
     ]),
     # ------------------------------------------------------------------
     ("General", [
         F("run_background", False, "bool", "Stage 1: estimate background fields",
-          "Only needed for background mode 'per_file' or 'pooled'."),
+          "Needed for background mode 'per_file' or 'pooled'. Mode 'image' prepares its correction from the "
+          "reference image either way."),
         F("run_segmentation", True, "bool", "Stage 2: segmentation"),
         F("run_measurement", True, "bool", "Stage 3: measurement"),
         F("run_aggregation", True, "bool", "Stage 4: aggregate all measurements"),
@@ -110,7 +113,40 @@ PARAM_SCHEMA = [
           "Settings on the 'Overview pictures' tab."),
         F("n_workers", 0, "int", "Parallel worker processes (0 = auto)",
           "Scenes are processed in parallel. On a 16 GB machine keep this at 2-6."),
-        F("timepoint", 0, "int", "Timepoint index", "Which T to analyse for time-lapse data.", advanced=True),
+        F("timepoint", 0, "int", "Timepoint index",
+          "Which T to analyse when 'Time-lapse data' is 'single timepoint'. Counting starts at 0.", advanced=True),
+    ]),
+    # ------------------------------------------------------------------
+    ("Time series", [
+        F("time_mode", "single", "choice", "Time-lapse data",
+          "single = analyse one timepoint (the 'Timepoint index', usually 0). "
+          "series = analyse every selected timepoint as its own image and (optionally) follow the cells over time.",
+          ["single", "series"]),
+        F("timepoints", "", "str", "Timepoints to analyse",
+          "Blank = all. Counting starts at 0. Examples: 0-20 (range), 0, 5, 10 (list), 0-100:5 (every 5th), "
+          "-1 (the last one).", enabled_if=("time_mode", ["series"])),
+        F("frame_interval_min", None, "float_opt", "Time between frames (min)",
+          "Used for the column time_min and the time axes of the plots. Empty = read from the file if it is "
+          "stored there, otherwise only frame numbers are used.", enabled_if=("time_mode", ["series"])),
+        F("track_cells", True, "bool", "Track cells over time",
+          "Links every cell to the cell in the next frame that covers most of the same area (mask overlap). "
+          "Each cell gets a track_id that stays the same from frame to frame.", enabled_if=("time_mode", ["series"])),
+        F("track_min_overlap", 0.25, "float", "Min. overlap to link two cells (IoU)",
+          "Overlap = shared area ÷ combined area of the two masks (0-1). Two cells in consecutive frames are only "
+          "linked if they overlap at least this much. Lower it for fast-moving cells or long frame intervals.",
+          enabled_if=("track_cells", [True])),
+        F("track_max_gap", 1, "int", "Bridge missing frames (max.)",
+          "A cell that is missing in up to this many frames (e.g. not segmented once) keeps its track_id when "
+          "it reappears at the same place. 0 = never bridge.", enabled_if=("track_cells", [True])),
+        F("track_divisions", True, "bool", "Record divisions / splits",
+          "When a new cell appears mostly inside the area of a cell of the previous frame, it is recorded as its "
+          "daughter (parent_track_id). This catches divisions and cells that were cut in two.",
+          enabled_if=("track_cells", [True])),
+        F("track_split_fraction", 0.5, "float", "Split: min. fraction of the new cell inside the old one",
+          enabled_if=("track_divisions", [True]), advanced=True),
+        F("save_tracked_labels", True, "bool", "Save label movie with track IDs",
+          "One multi-frame .tif per scene in which every cell has its track_id as grey value -- open it in Fiji "
+          "(Image › Lookup Tables › glasbey) to check the tracking.", enabled_if=("track_cells", [True])),
     ]),
     # ------------------------------------------------------------------
     ("Channels", [
@@ -147,16 +183,44 @@ PARAM_SCHEMA = [
         F("background_mode", "none", "choice", "Background / flatfield correction",
           "none = no correction; per_file = estimate one field per input file; "
           "pooled = one field from ALL input files (best for folders of single-scene .czi); "
-          "existing = use .npy files you already have.",
-          ["none", "per_file", "pooled", "existing"]),
-        F("background_channels", "0, 1", "int_list", "Channels to estimate",
-          enabled_if=("background_mode", ["per_file", "pooled"])),
+          "existing = use .npy files you already have; "
+          "image = use reference images you recorded on the microscope (.czi, .lif, .tif, ...).",
+          ["none", "per_file", "pooled", "existing", "image"]),
+        F("background_image_path", "", "image_open", "Reference image",
+          "An image file recorded on the microscope with the SAME objective and settings: a uniformly fluorescent "
+          "slide (flatfield) or a sample without cells (blank). Several scenes/positions in the file are averaged.",
+          enabled_if=("background_mode", ["image"])),
+        F("background_image_type", "flatfield", "choice", "The reference image is a …",
+          "flatfield = uniformly bright sample (fluorescent slide / dye): images are DIVIDED by it, which evens "
+          "out the illumination. blank = sample without cells or stain: it is SUBTRACTED (removes "
+          "autofluorescence, stray light and camera offset).", ["flatfield", "blank"],
+          enabled_if=("background_mode", ["image"])),
+        F("background_image_scenes", "", "str_list", "Use only scenes containing",
+          "Blank = all scenes/positions of the reference file. Comma-separated name parts.",
+          enabled_if=("background_mode", ["image"])),
+        F("background_image_channel_map", "", "str", "Channel mapping (image = reference)",
+          "Blank = channel numbers are the same in both files. Otherwise pairs like 0=1, 1=0: data channel 0 is "
+          "corrected with reference channel 1, and so on.", enabled_if=("background_mode", ["image"])),
+        F("background_dark_path", "", "image_open", "Dark image (optional)",
+          "Flatfield only: an image taken with the light path closed (camera offset). It is subtracted from both "
+          "the reference and your images before dividing. Blank = use the offset below.",
+          enabled_if=("background_image_type", ["flatfield"])),
+        F("background_offset", 0.0, "float", "Camera offset (grey values)",
+          "Flatfield only, when there is no dark image: a constant subtracted from the reference and your images "
+          "before dividing (e.g. 100 for many sCMOS cameras). 0 = none.",
+          enabled_if=("background_image_type", ["flatfield"])),
+        F("background_metadata_check", "warn", "choice", "Check the reference against the images",
+          "Compares objective (name, magnification, NA), pixel size, field of view and channels of the reference "
+          "with every input file. warn = report differences and continue; stop = do not run if anything important "
+          "differs; off = no check.", ["warn", "stop", "off"], enabled_if=("background_mode", ["image"])),
+        F("background_channels", "0, 1", "int_list", "Channels to correct",
+          enabled_if=("background_mode", ["per_file", "pooled", "image"])),
         F("background_downsample", 4, "int", "Downsample factor",
-          enabled_if=("background_mode", ["per_file", "pooled"])),
+          enabled_if=("background_mode", ["per_file", "pooled", "image"])),
         F("background_smooth_sigma", 50.0, "float", "Smoothing sigma (downsampled px)",
-          enabled_if=("background_mode", ["per_file", "pooled"])),
+          enabled_if=("background_mode", ["per_file", "pooled", "image"])),
         F("background_z_projection", "max", "choice", "Z projection", "", ["max", "mean", "middle"],
-          enabled_if=("background_mode", ["per_file", "pooled"])),
+          enabled_if=("background_mode", ["per_file", "pooled", "image"])),
         F("background_max_scenes", 0, "int", "Max scenes used (0 = all)",
           enabled_if=("background_mode", ["per_file", "pooled"])),
         F("overwrite_background", False, "bool", "Overwrite existing background fields",
@@ -165,9 +229,9 @@ PARAM_SCHEMA = [
           "channel=path pairs separated by ';', e.g. 0=/data/ch0_background.npy; 1=/data/ch1_background.npy",
           enabled_if=("background_mode", ["existing"])),
         F("correct_in_segmentation", True, "bool", "Apply correction before segmentation",
-          enabled_if=("background_mode", ["per_file", "pooled", "existing"])),
+          enabled_if=("background_mode", ["per_file", "pooled", "existing", "image"])),
         F("correct_in_measurement", True, "bool", "Apply correction before measurement",
-          enabled_if=("background_mode", ["per_file", "pooled", "existing"])),
+          enabled_if=("background_mode", ["per_file", "pooled", "existing", "image"])),
     ]),
     # ------------------------------------------------------------------
     ("Segmentation", [
@@ -422,6 +486,63 @@ def parse_int_list(value):
     return [int(v) for v in parse_str_list(value)]
 
 
+def parse_channel_map(value):
+    """'0=1, 1=0' -> {0: 1, 1: 0} (data channel -> reference channel). Blank -> {}."""
+    out = {}
+    for part in str(value or "").replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise ValueError(f"Channel mapping: '{part}' is not of the form data=reference (e.g. 0=1)")
+        a, b = part.split("=", 1)
+        try:
+            out[int(a)] = int(b)
+        except ValueError:
+            raise ValueError(f"Channel mapping: '{part}' -- both sides must be channel numbers")
+    return out
+
+
+def parse_timepoints(value, n_t):
+    """
+    Timepoint selection -> sorted list of indices < n_t.
+      ''            all            '0-20'      0..20 (inclusive)
+      '0, 5, 10'    a list         '0-100:5'   every 5th from 0 to 100
+      '-1'          the last one   '10-'       10 to the end
+    """
+    text = str(value or "").strip()
+    if not text:
+        return list(range(n_t))
+    chosen = set()
+    for part in text.replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        step = 1
+        if ":" in part:
+            part, st = part.split(":", 1)
+            try:
+                step = int(st)
+            except ValueError:
+                raise ValueError(f"Timepoints: step '{st}' is not a whole number")
+            if step < 1:
+                raise ValueError("Timepoints: the step must be 1 or more")
+        try:
+            if part.startswith("-") and part[1:].isdigit():
+                idx = [n_t + int(part)]
+            elif "-" in part:
+                a, b = part.split("-", 1)
+                a = int(a) if a.strip() else 0
+                b = int(b) if b.strip() else n_t - 1
+                idx = list(range(a, b + 1, step))
+            else:
+                idx = [int(part)]
+        except ValueError:
+            raise ValueError(f"Timepoints: cannot read '{part}' (examples: 0-20, 0, 5, 10, 0-100:5)")
+        chosen.update(i for i in idx if 0 <= i < n_t)
+    return sorted(chosen)
+
+
 def parse_channel_paths(value):
     """'0=/a.npy; 1=/b.npy' (or dict) -> {0: '/a.npy', 1: '/b.npy'}"""
     if not value:
@@ -508,9 +629,26 @@ def validate_config(cfg):
     if cfg["seg_mode"] != "mip" and cfg["run_measurement"]:
         problems.append("Measurement needs 2D labels: set segmentation 'Z handling' to 'mip' "
                         "or disable the measurement stage.")
-    if cfg["run_background"] and cfg["background_mode"] not in ("per_file", "pooled"):
+    if cfg["run_background"] and cfg["background_mode"] not in ("per_file", "pooled", "image"):
         problems.append("Stage 1 (background estimation) is on, but background mode is "
-                        f"'{cfg['background_mode']}' -- choose 'per_file' or 'pooled', or switch stage 1 off.")
+                        f"'{cfg['background_mode']}' -- choose 'per_file', 'pooled' or 'image', or switch stage 1 off.")
+    if cfg["background_mode"] == "image":
+        for key in ("background_image_path", "background_dark_path"):
+            if cfg[key] and not Path(cfg[key]).exists():
+                problems.append(f"{ALL_FIELDS[key]['label']} not found: {cfg[key]}")
+        if not cfg["background_image_path"]:
+            problems.append("Background mode 'image' but no reference image chosen (Background tab).")
+        try:
+            parse_channel_map(cfg["background_image_channel_map"])
+        except ValueError as e:
+            problems.append(str(e))
+    if cfg["time_mode"] == "series":
+        try:
+            parse_timepoints(cfg["timepoints"], 10 ** 6)
+        except ValueError as e:
+            problems.append(str(e))
+        if not 0 < cfg["track_min_overlap"] <= 1:
+            problems.append("'Min. overlap to link two cells' must be between 0 and 1.")
     if cfg["background_mode"] == "existing":
         try:
             paths = parse_channel_paths(cfg["existing_background_paths"])
@@ -570,6 +708,7 @@ def output_paths(cfg):
         logs=Path(cfg["log_dir"]) if cfg.get("log_dir") else (root / "logs" if root else None),
         datasets=root / cfg.get("datasets_subdir", "per_file") if root else None,
         pooled_background=root / "pooled_background" if root else None,
+        measured_background=root / "measured_background" if root else None,
         results=results,
         aggregated=aggregated,
         size_statistics=results / "size_statistics" if results else None,

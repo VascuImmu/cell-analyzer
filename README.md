@@ -1,4 +1,4 @@
-# Cell Analyzer (v3.1.1)
+# Cell Analyzer (v3.3)
 
 Cell Analyzer segments nuclei and cells in microscopy images (`.lif`, `.czi`, `.ome.tif`/`.tif`, `.nd2`) and measures every cell. It then combines the results of all files and makes plots and statistics per condition. All of this runs from one window.
 
@@ -39,6 +39,7 @@ What the installer does on each system:
 
 - **macOS:** it removes the quarantine flag that blocks double-clicking downloaded scripts, restores the files' execute permission, and builds a local `Cell Analyzer.app`.
 - **Windows:** the start file puts the environment's DLL folders first on `PATH`, which is the same thing `conda activate` does. Without this, Windows can load another program's DLLs and crash with code 0xC06D007F.
+- **Windows, Miniforge 26.9.4:** that Miniforge release cannot create environments ("Could not find 'share/conda-launchers/cli-64.exe' in the conda-launchers package"). The installer detects the broken package record (`tools/check_conda_launchers.py`) and repairs it with `conda install -n base --force-reinstall conda-launchers` before creating the environment. See [conda-forge/miniforge#914](https://github.com/conda-forge/miniforge/pull/914).
 
 The start files look for the environment in every usual Miniforge, Miniconda or Anaconda location. They also still accept the environment name `cellpipeline` used before the rename.
 
@@ -48,11 +49,11 @@ The start files look for the environment in every usual Miniforge, Miniconda or 
 
 A run starts from the window or the command line, checks the settings, finds the files and scenes, and then runs the stages in order. Each stage has its own switch on the Stages & Channels tab:
 
-- Boxes with dashed borders are stages that are off by default (overview pictures, background).
+- Boxes with dashed borders are steps that are off by default (overview pictures, background, tracking of time series).
 - Inside segmentation, the blue path is used when there is a nuclei channel and the purple path when cells are found from the junctions alone. Both paths continue with clean-up, cell contacts and size statistics.
 - Grey dotted boxes are the files each step writes.
 
-The overview pictures, background, segmentation and measurement stages run scene by scene in parallel worker processes. The picture follows your light or dark mode; open `docs/flowchart.svg` in a browser to see it full size.
+The overview pictures, background, segmentation and measurement stages run scene by scene (time series: scene × timepoint) in parallel worker processes. The picture follows your light or dark mode; open `docs/flowchart.svg` in a browser to see it full size.
 
 ## Folder structure
 
@@ -81,6 +82,7 @@ cell-analyzer/
         ├── segmentation.py   2  nuclei + cell watershed (or junction-only seeding), multi-nucleated cells, adjacency, QC plots
         ├── diagnostics.py       size statistics of nuclei and cells, suggested settings
         ├── overview.py          overview pictures of the raw images (channels side by side, merge, scale bar)
+        ├── tracking.py          time series: links cells between frames by mask overlap
         ├── measurement.py    3  per-cell shape, intensity and junction measurements
         ├── aggregation.py    4  one combined table, plate map, Z-scores
         └── analysis.py       5  plots and statistics per condition
@@ -98,8 +100,10 @@ cell-analyzer/
 │   ├── analysis_parameters.json
 │   ├── segmentation_qc/  segmentation/  measurements/  background/
 │   ├── overview/                             <scene>_overview.png (if switched on)
-│   └── adjacency/                            which cells touch: <dataset>_cell_adjacency.csv, <scene>_adjacency_matrix.npz
+│   ├── adjacency/                            which cells touch: <dataset>_cell_adjacency.csv, <scene>_adjacency_matrix.npz
+│   └── tracking/                             time series: <dataset>_tracks.csv, _track_summary.csv, <scene>_tracked_labels.tif
 ├── pooled_background/                        background mode "pooled"
+├── measured_background/                      background mode "image": corrections + reference_check.csv
 └── logs/                                     analysis_log_<time>.json / .txt / _console.txt
 ```
 
@@ -121,7 +125,11 @@ python -m cell_analyzer.stages.analysis results/aggregated_cell_measurements.csv
 
 ## Pipeline stages
 
-1. **Background** (optional). Averages many scenes into an illumination field. It can be made per file, pooled across all files, or loaded from existing `.npy` files.
+1. **Background** (optional). Averages many scenes into an illumination field. It can be made per file, pooled across all files, loaded from existing `.npy` files, or made from a reference image recorded on the microscope (mode `image`, any readable format):
+   - `flatfield` reference (uniformly fluorescent sample): images are divided by it after subtracting a camera offset or dark image.
+   - `blank` reference (sample without cells or stain): it is subtracted.
+   - Before use, the reference is compared with every input file: objective name, magnification and NA (Zeiss, Leica and OME metadata), pixel size, field of view and channel names. Differences go to the Run log and `measured_background/reference_check.csv`; with `background_metadata_check = stop` the run does not start when objective, pixel size or field of view differ.
+   - A correction is `<name>.npy` plus an optional `<name>.json` (`operation` divide/subtract, `offset`, `dark`). Files without `.json` are flatfields, as before.
 2. **Segmentation.**
    - Size settings are in µm / µm². Settings left empty are derived from the typical nucleus diameter (10 µm) and the typical cell area (1000 µm²) and converted to pixels with each image's pixel size (`sizes.py`). The values used are printed in the Run log and saved in `segmentation_summary.csv` (`used_*_px`).
    - With a nuclei channel: Otsu thresholding, distance transform, and a watershed that splits touching nuclei. Cells are then grown from the nuclei over the smoothed junction image.
@@ -130,18 +138,22 @@ python -m cell_analyzer.stages.analysis results/aggregated_cell_measurements.csv
    - Adjacency: every pair of cells that share a boundary (4-connected contact of the labels, not centroid distance), with contact length and mean junction intensity.
    - Size statistics are plotted after segmentation: nucleus and cell area, diameter, eccentricity, distance between nuclei and nuclei per cell, in µm, with the current thresholds, the typical sizes and suggested values drawn in.
    - Scenes below the confluence threshold are masked to the tissue area if non-confluent analysis is on. Otherwise they are treated as confluent or skipped. The decision for each scene is saved in `segmentation_summary.csv`.
+   - Time series (`time_mode = series`): every selected timepoint is segmented as its own image; file names get `_t0000`, `_t0001`, ….
+   - **Tracking** (time series): cells of consecutive frames are linked one-to-one by mask overlap (IoU, Hungarian matching, minimum IoU 0.25). Cells missing for up to `track_max_gap` frames keep their track; a new cell lying mostly inside a cell of the previous frame is recorded as its daughter (`parent_track_id`).
 3. **Measurement.**
    - Shape: area, axes, orientation, solidity, ruggedness and more.
    - Per-channel intensity in the cell and in the nucleus.
    - Intensity in a ring along the cell boundary, for the junction channels.
    - `n_nuclei`, the number of nuclei in the cell; `n_neighbours` and `neighbour_contact_um` from the adjacency.
    - Well ID, read from the scene or file name with a regex you can change.
+   - Time series: `timepoint`, `time_min` (frame interval from the file metadata or the setting), `track_id`, `parent_track_id`, `track_n_frames`.
 4. **Aggregation.**
    - Combines the tables of all files and keeps only the latest rescan of each plate.
    - Adds plate-map metadata.
    - Computes Z-scores against the controls of the same dataset, the same plate, or all data.
 5. **Analysis.**
    - Plots per condition: violin, box, replicate plots (superplots), ECDFs, plate heatmaps and an overview heatmap.
+   - Time series: time courses per condition (median and 25–75 % range over time) in `results/plots/time_courses/`.
    - Summary statistics with two tests against the control. The cell-level Mann-Whitney test is only indicative. Use the replicate-level Welch t-test on per-replicate medians. Both are Benjamini-Hochberg corrected.
 
 ## Adjacency files
@@ -156,6 +168,25 @@ pairs = pd.read_csv("per_file/<dataset>/adjacency/<dataset>_cell_adjacency.csv")
 ```
 
 Cells touching the image border are removed before the adjacency is built, so cells next to the border have fewer listed neighbours.
+
+## Time series and tracking files
+
+```python
+import pandas as pd
+m = pd.read_csv("results/aggregated_cell_measurements.csv")
+whole = m[m.track_n_frames == m.timepoint.nunique()]           # cells followed through every frame
+speed = (m.sort_values("timepoint").groupby(["source_dataset", "scene", "track_id"])[["centroid_x", "centroid_y"]]
+           .diff().pow(2).sum(axis=1).pow(0.5))                   # displacement per frame in px
+```
+
+`tracking/<scene>_tracked_labels.tif` is a T × Y × X label movie whose grey values are the track IDs (Fiji: *Image › Lookup Tables › glasbey*). Track IDs are unique within a scene.
+
+## Changes in 3.3
+
+- **Windows installer** repairs the broken `conda-launchers` record of Miniforge 26.9.4 before creating the environment (see Quick start).
+- **Background from a reference image** (`background_mode = image`): a flatfield or blank recorded on the microscope, in any format the program reads, with camera offset or dark image, channel mapping, and a check of objective / pixel size / field of view / channels against every input file.
+- **Time series** (Time series tab): analyse all or some timepoints (`0-20`, `0, 5, 10`, `0-100:5`, `-1`), track cells by mask overlap with gap bridging and division detection, label movies with track IDs, and time-course plots.
+- Segmentation and measurement tables now have a `timepoint` column; in single-timepoint mode file names and results are unchanged.
 
 ## Changes in 3.2
 

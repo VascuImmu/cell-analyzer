@@ -63,3 +63,79 @@ def apply_flatfield_correction(image, flatfield):
     flatfield = np.clip(flatfield, 1e-3, None)
 
     return (image.astype(np.float32) / flatfield).astype(np.float32)
+
+
+# -------------------------------------------------
+# Corrections with a description file (background mode 'image')
+# -------------------------------------------------
+# A correction is a field <name>.npy, optionally with <name>.json next to it:
+#   {"operation": "divide" | "subtract",       divide = flatfield, subtract = blank sample
+#    "offset": 100.0 | null,                   constant camera offset (divide only)
+#    "dark": "<name>_dark.npy" | null}         dark image, same grid as the field (divide only)
+# Without the .json file a field is a flatfield without offset -- exactly the behaviour of the
+# fields made by the background stage and of existing .npy files.
+import json
+from pathlib import Path
+
+
+def _resize(field, shape):
+    if field.shape != tuple(shape):
+        field = zoom(field, (shape[0] / field.shape[0], shape[1] / field.shape[1]), order=1)
+    return field
+
+
+def load_correction(path):
+    """-> dict(operation, field, offset) ready for correct_image()."""
+    path = Path(path)
+    meta = {}
+    side = path.with_suffix(".json")
+    if side.exists():
+        with open(side) as f:
+            meta = json.load(f)
+    op = meta.get("operation", "divide")
+    field = np.load(path).astype(np.float32)
+    offset = meta.get("offset")
+    if meta.get("dark"):
+        dark_path = Path(meta["dark"])
+        if not dark_path.is_absolute():
+            dark_path = path.parent / dark_path
+        offset = np.load(dark_path).astype(np.float32)
+    if op == "divide":
+        mean_val = float(field.mean())
+        if mean_val <= 0:
+            raise ValueError(f"Flatfield {path} has non-positive mean ({mean_val}); cannot normalize.")
+        field = field / mean_val
+    elif op != "subtract":
+        raise ValueError(f"{side}: unknown operation '{op}'")
+    return dict(operation=op, field=field, offset=offset, path=str(path))
+
+
+def correct_image(image, corr):
+    """Apply a correction from load_correction() to a 2D (Y, X) or 3D (Z, Y, X) image."""
+    img = image.astype(np.float32)
+    shape = img.shape[-2:]
+    field = _resize(corr["field"], shape)
+    if corr["operation"] == "subtract":
+        return (img - field).astype(np.float32)
+    off = corr.get("offset")
+    if off is not None:
+        img = img - (_resize(off, shape) if np.ndim(off) == 2 else np.float32(off))
+    return (img / np.clip(field, 1e-3, None)).astype(np.float32)
+
+
+def save_correction(path, field, operation="divide", offset=None, dark=None, info=None):
+    """Write <path>.npy (+ <path>.json). `dark` is an array saved as <stem>_dark.npy."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(path, np.asarray(field, dtype=np.float32))
+    meta = dict(operation=operation, offset=None if offset in (None, 0, 0.0) else float(offset), dark=None)
+    if dark is not None:
+        dp = path.with_name(path.stem + "_dark.npy")
+        np.save(dp, np.asarray(dark, dtype=np.float32))
+        meta["dark"] = dp.name
+        meta["offset"] = None
+    if info:
+        meta["info"] = info
+    with open(path.with_suffix(".json"), "w") as f:
+        json.dump(meta, f, indent=2, default=str)
+    return path

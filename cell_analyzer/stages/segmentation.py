@@ -75,7 +75,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from .flatfield import load_and_normalize_background, apply_flatfield_correction
+from .flatfield import load_correction, correct_image
 from ..io_utils import load_channel, n_z, scene_stem
 
 # Defaults for calling the functions of this module directly, in PIXELS (size_units="px").
@@ -686,20 +686,24 @@ def _add_metric_columns(stats, adjacency, ps):
 # Per-scene worker (top-level for ProcessPoolExecutor)
 # -------------------------------------------------
 def segment_scene(file_str, scene, dataset_stem, seg_dir_str, qc_dir_str, p,
-                  background_path_nuclei=None, background_path_edge=None, adj_dir_str=None):
-    """Returns a summary dict for this scene (never raises)."""
+                  background_path_nuclei=None, background_path_edge=None, adj_dir_str=None, timepoint=None):
+    """Returns a summary dict for this scene (never raises).
+    timepoint: None = single-timepoint mode (uses p['timepoint'], file names without '_tNNNN');
+               a number = time-series mode (this frame, file names with '_tNNNN')."""
     from ..sizes import resolve_sizes, report_text
     from ..io_utils import scene_geometry
     p = {**DEFAULT_SEG_PARAMS, **p}
     seg_dir = Path(seg_dir_str)
-    stem = scene_stem(dataset_stem, scene)
+    stem = scene_stem(dataset_stem, scene, timepoint)
+    t_load = p["timepoint"] if timepoint is None else int(timepoint)
+    where = scene if timepoint is None else f"{scene} t={t_load}"
     cell_path = seg_dir / f"{stem}_cell_labels.tif"
     nuclei_labels_path = seg_dir / f"{stem}_nuclei_labels.tif"
     nuclei_mask_path = seg_dir / f"{stem}_nuclei_mask.tif"
     qc_path = Path(qc_dir_str) / f"{stem}_qc.png" if qc_dir_str else None
     use_nuclei = p["seed_source"] != "junctions"
 
-    summary = dict(dataset=dataset_stem, file=Path(file_str).name, scene=scene, scene_stem=stem,
+    summary = dict(dataset=dataset_stem, file=Path(file_str).name, scene=scene, timepoint=t_load, scene_stem=stem,
                    seed_source=p["seed_source"], pixel_size_um=np.nan,
                    n_nuclei=np.nan, n_cells=np.nan, n_multinucleated=np.nan, confluent=None,
                    status="", message="", stats=None, adjacency=None, sizes_text=None, sizes_px=None)
@@ -717,18 +721,18 @@ def segment_scene(file_str, scene, dataset_stem, seg_dir_str, qc_dir_str, p,
         summary.update(pixel_size_um=ps if ps else np.nan, sizes_text=report_text(report, ps, indent="    "),
                        sizes_px={k: v for k, v in px.items()})
 
-        ff_nuc = load_and_normalize_background(background_path_nuclei) if (background_path_nuclei and use_nuclei) else None
-        ff_edge = load_and_normalize_background(background_path_edge) if background_path_edge else None
+        ff_nuc = load_correction(background_path_nuclei) if (background_path_nuclei and use_nuclei) else None
+        ff_edge = load_correction(background_path_edge) if background_path_edge else None
 
         def load_pair(mode, z=None):
-            edge = load_channel(file_str, scene, p["edge_channel"], mode, z, p["timepoint"])
+            edge = load_channel(file_str, scene, p["edge_channel"], mode, z, t_load)
             if ff_edge is not None:
-                edge = apply_flatfield_correction(edge, ff_edge)
+                edge = correct_image(edge, ff_edge)
             if not use_nuclei:
                 return None, edge
-            nuc = load_channel(file_str, scene, p["nuclei_channel"], mode, z, p["timepoint"])
+            nuc = load_channel(file_str, scene, p["nuclei_channel"], mode, z, t_load)
             if ff_nuc is not None:
-                nuc = apply_flatfield_correction(nuc, ff_nuc)
+                nuc = correct_image(nuc, ff_nuc)
             nuc, edge = crop_to_common_shape(nuc, edge)
             return nuc, edge
 
@@ -781,12 +785,13 @@ def segment_scene(file_str, scene, dataset_stem, seg_dir_str, qc_dir_str, p,
             for t in (stats.get("nuclei"), stats.get("cells")):
                 if t is not None and len(t):
                     t.insert(0, "scene", scene)
+                    t.insert(1, "timepoint", t_load)
             summary["stats"] = stats
 
         if skipped:
             what = f"{n_nuclei} nuclei" if use_nuclei else "too few cells"
             summary.update(status="skipped_sparse",
-                           message=f"↷ Skipped non-confluent scene ({what} < {p['min_nuclei_confluent']}): {scene}")
+                           message=f"↷ Skipped non-confluent scene ({what} < {p['min_nuclei_confluent']}): {where}")
             return summary
 
         seg_dir.mkdir(parents=True, exist_ok=True)
@@ -805,6 +810,7 @@ def segment_scene(file_str, scene, dataset_stem, seg_dir_str, qc_dir_str, p,
         # ---- adjacency: which cells touch ----
         if p["save_adjacency"] and adjacency is not None and cell_labels.ndim == 2:
             adjacency.insert(0, "scene", scene)
+            adjacency.insert(1, "timepoint", t_load)
             summary["adjacency"] = adjacency
             if adj_dir_str:
                 from scipy import sparse
@@ -815,11 +821,11 @@ def segment_scene(file_str, scene, dataset_stem, seg_dir_str, qc_dir_str, p,
         tag = "confluent" if confluent else ("non-confluent, masked" if p["nonconfluent_enabled"]
                                              else "non-confluent, unmasked")
         if use_nuclei:
-            msg = f"✓ Segmented {scene}: {n_nuclei} nuclei, {n_cells} cells ({tag})"
+            msg = f"✓ Segmented {where}: {n_nuclei} nuclei, {n_cells} cells ({tag})"
             if n_multi:
                 msg += f", {n_multi} multi-nucleated"
         else:
-            msg = (f"✓ Segmented {scene} from junctions: {n_cells} cells ({tag}; {n_seeds} starting points, "
+            msg = (f"✓ Segmented {where} from junctions: {n_cells} cells ({tag}; {n_seeds} starting points, "
                    f"{n_merged} merged)")
 
         if p["save_qc_plot"] and qc_path is not None:
@@ -841,7 +847,7 @@ def segment_scene(file_str, scene, dataset_stem, seg_dir_str, qc_dir_str, p,
         return summary
 
     except Exception as e:
-        summary.update(status="error", message=f"✗ Error segmenting {scene}: {type(e).__name__}: {e}")
+        summary.update(status="error", message=f"✗ Error segmenting {where}: {type(e).__name__}: {e}")
         return summary
 
 
@@ -889,6 +895,20 @@ def _save_qc_plot(nuclei_img, edge_img, cell_labels_2d, save_path, title_extra="
 # -------------------------------------------------
 # Summaries
 # -------------------------------------------------
+def _keep_old(old, new):
+    """Rows of an existing table that are NOT redone by `new`. Rows are identified by scene, and by
+    (scene, timepoint) when both tables have several timepoints per scene (time-series mode)."""
+    if "scene" not in old.columns or "scene" not in new.columns:
+        return old
+    series = ("timepoint" in new.columns and new.groupby("scene")["timepoint"].nunique().max() > 1) or \
+             ("timepoint" in old.columns and len(old) and old.groupby("scene")["timepoint"].nunique().max() > 1)
+    if not series or "timepoint" not in old.columns or "timepoint" not in new.columns:
+        return old[~old["scene"].isin(new["scene"])]
+    k_old = old["scene"].astype(str) + "|" + old["timepoint"].astype(str)
+    k_new = set(new["scene"].astype(str) + "|" + new["timepoint"].astype(str))
+    return old[~k_old.isin(k_new)]
+
+
 def write_segmentation_summary(summaries, seg_dir, dataset_stem):
     """Merge new per-scene summaries into <seg_dir>/<stem>_segmentation_summary.csv."""
     seg_dir = Path(seg_dir)
@@ -907,8 +927,7 @@ def write_segmentation_summary(summaries, seg_dir, dataset_stem):
     new = new[new["status"] != "skipped_exists"]
     if path.exists():
         old = pd.read_csv(path)
-        old = old[~old["scene"].isin(new["scene"])]
-        new = pd.concat([old, new], ignore_index=True)
+        new = pd.concat([_keep_old(old, new), new], ignore_index=True)
     new.drop(columns=["message"], errors="ignore").to_csv(path, index=False)
     return path
 
@@ -931,7 +950,7 @@ def write_object_statistics(summaries, seg_dir, dataset_stem):
                 new[k].append(st[k])
         raw = st.get("raw_object_areas")
         if raw is not None and len(raw):
-            d = pd.DataFrame({"scene": s["scene"], "area_px": raw})
+            d = pd.DataFrame({"scene": s["scene"], "timepoint": s.get("timepoint", 0), "area_px": raw})
             ps = s.get("pixel_size_um")
             if ps and ps == ps:
                 d["area_um2"] = (d["area_px"] * ps * ps).round(3)
@@ -944,7 +963,7 @@ def write_object_statistics(summaries, seg_dir, dataset_stem):
         if path.exists():
             try:
                 old = pd.read_csv(path)
-                df = pd.concat([old[~old["scene"].isin(df["scene"].unique())], df], ignore_index=True)
+                df = pd.concat([_keep_old(old, df), df], ignore_index=True)
             except Exception:
                 pass
         df.to_csv(path, index=False)
@@ -954,8 +973,9 @@ def write_adjacency(summaries, adj_dir, dataset_stem):
     """Write/merge <adj_dir>/<stem>_cell_adjacency.csv: one row per pair of touching cells
     (scene, cell_id_a, cell_id_b, contact_px, contact_um, junction_intensity)."""
     parts = [s["adjacency"] for s in summaries if s.get("adjacency") is not None]
-    done = [s["scene"] for s in summaries if s.get("status") == "ok"]
-    if not parts and not done:
+    done = pd.DataFrame([dict(scene=s["scene"], timepoint=s.get("timepoint", 0))
+                         for s in summaries if s.get("status") == "ok"])
+    if not parts and not len(done):
         return None
     adj_dir = Path(adj_dir)
     adj_dir.mkdir(parents=True, exist_ok=True)
@@ -964,7 +984,7 @@ def write_adjacency(summaries, adj_dir, dataset_stem):
     if path.exists():
         try:
             old = pd.read_csv(path)
-            df = pd.concat([old[~old["scene"].isin(done)], df], ignore_index=True)
+            df = pd.concat([_keep_old(old, done), df], ignore_index=True)
         except Exception:
             pass
     df.to_csv(path, index=False)

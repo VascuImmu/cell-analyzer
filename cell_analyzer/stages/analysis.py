@@ -14,6 +14,8 @@ Reads the aggregated cell table (stage 4) and, for every "group by" column
       ecdf/<column>.png
       overview_heatmap.png             every condition x every column, shift vs control
     plate_heatmaps/<column>.png        per-well median on the plate layout (if wells are known)
+    time_courses/by_<group>/<column>.png   (time-series data) median per condition over time with the
+                                           25-75 % range; violins etc. above pool all timepoints
 
 Statistics note: cells from the same well/scene are not independent, so
 cell-level p-values are almost always tiny. The replicate-level test (on
@@ -61,7 +63,10 @@ plt.rcParams.update({
 })
 
 META_COLS = ["plate_num", "sample_num", "rescan_num", "source_dataset", "dataset", "file", "scene",
-             "well_row", "well_column", "well_id", "scene_confluent", "is_control", "cell_id"]
+             "well_row", "well_column", "well_id", "scene_confluent", "is_control", "cell_id",
+             "timepoint", "time_min", "track_id", "parent_track_id", "track_n_frames"]
+# categorical colours for time courses (colour-blind friendly, controls stay grey)
+SERIES = ["#2a78d6", "#e3a008", "#c2378f", "#1baf7a", "#7a5cd6", "#e36a2a", "#3fb3c9", "#8a6d3b", "#d64f70", "#5a8f29"]
 
 
 # -------------------------------------------------
@@ -520,6 +525,47 @@ def plate_heatmaps(df, columns, out_dir, fmt, dpi, figures):
             figures.append(("plate heatmaps", "plate", col, pdir / name))
 
 
+def time_courses(df, gcol, columns, cfg, out_dir, figures):
+    """Median per group and timepoint with the 25-75 % range of the cells, one figure per column."""
+    use_min = "time_min" in df.columns and df["time_min"].notna().all()
+    tcol, xlabel = ("time_min", "time (min)") if use_min else ("timepoint", "timepoint (frame)")
+    d = df[df[gcol].notna()].copy()
+    d[gcol] = d[gcol].astype(str)
+    groups, ctrl = order_groups(d, gcol, cfg["sort_groups"], cfg["controls_first"], columns[0] if columns else None)
+    labels = group_labels(d, gcol, cfg["label_column"])
+    gdir = out_dir / "time_courses" / f"by_{_safe(gcol)}"
+    gdir.mkdir(parents=True, exist_ok=True)
+    n_shown = min(len(groups), 12)
+    if len(groups) > n_shown:
+        print(f"  ⚠ {len(groups)} groups by {gcol} -- time courses show the first {n_shown}")
+    q = d.groupby([gcol, tcol])
+    for col in columns:
+        stats = q[col].quantile([0.25, 0.5, 0.75]).unstack()
+        fig, ax = plt.subplots(figsize=(7.2, 4.2))
+        ci = 0
+        for g in groups[:n_shown]:
+            if g not in stats.index.get_level_values(0):
+                continue
+            st = stats.loc[g].sort_index()
+            color = CTRL if g in ctrl else SERIES[ci % len(SERIES)]
+            ci += 0 if g in ctrl else 1
+            ax.fill_between(st.index, st[0.25], st[0.75], color=color, alpha=0.15, lw=0)
+            ax.plot(st.index, st[0.5], color=color, lw=1.8, marker="o", ms=2.5,
+                    label=str(labels.get(g, g)) + (" (control)" if g in ctrl else ""))
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(col)
+        ax.set_title(f"{col} over time · by {gcol}", loc="left")
+        ax.grid(axis="x", visible=False)
+        ax.legend(fontsize=7.5, loc="center left", bbox_to_anchor=(1.01, 0.5))
+        fig.text(0.01, 0.01, "line = median of the cells, band = 25-75 % of the cells", fontsize=7.5, color=INK2)
+        fig.tight_layout(rect=(0, 0.03, 1, 1))
+        path = gdir / f"{_safe(col)}.{cfg['figure_format']}"
+        fig.savefig(path, dpi=cfg["figure_dpi"])
+        plt.close(fig)
+        figures.append((f"Time courses by {gcol}", "median over time", col, path))
+    print(f"  ✓ time courses by {gcol}: {gdir}")
+
+
 def write_index(out_dir, figures, info):
     sections = {}
     for sec, kind, col, path in figures:
@@ -613,6 +659,11 @@ def run_analysis(cfg):
 
     if cfg["plot_plate_heatmap"]:
         plate_heatmaps(df, columns, out_dir, cfg["figure_format"], cfg["figure_dpi"], figures)
+
+    if "timepoint" in df.columns and df["timepoint"].nunique() > 1:
+        print(f"\n  -- time courses: {df['timepoint'].nunique()} timepoints")
+        for g in gcols:
+            time_courses(df, g, [c for c in columns if c != g], cfg, out_dir, figures)
 
     if cfg["make_html_index"]:
         write_index(out_dir, figures, f"{len(df):,} cells from {src} · replicate unit: {cfg['replicate_level']}")

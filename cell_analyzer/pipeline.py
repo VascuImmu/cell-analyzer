@@ -152,12 +152,79 @@ def _dirs(cfg, stem):
                 qc=root / cfg["qc_subdir"],
                 meas=root / cfg["measurements_subdir"],
                 adj=root / cfg["adjacency_subdir"],
-                overview=root / cfg["overview_subdir"])
+                overview=root / cfg["overview_subdir"],
+                track=root / cfg["tracking_subdir"])
 
 
 def _n_workers(cfg):
     n = int(cfg["n_workers"] or 0)
     return n if n > 0 else min(4, max(1, multiprocessing.cpu_count() - 1))
+
+
+class RunStopped(Exception):
+    """A check failed in a way the user asked to stop for (message is shown as is)."""
+
+
+def _background_from_image(cfg, datasets, result, summary):
+    from .stages.background import fields_from_reference_image, compare_acquisition, _pick_scenes
+    from .config import parse_channel_map
+    import pandas as pd
+    ref = Path(cfg["background_image_path"])
+    out_dir = output_paths(cfg)["measured_background"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"\n=== Background from reference image: {ref.name} ===", flush=True)
+
+    # ---- does the reference fit the images? ----
+    policy = cfg["background_metadata_check"]
+    if policy != "off":
+        ref_info = io_utils.acquisition_info(ref, _pick_scenes(ref, cfg["background_image_scenes"])[0])
+        ob = ref_info["objective"] or {}
+        print(f"Reference: objective {ob.get('name') or '?'} ({ob.get('magnification') or '?'}x, NA {ob.get('na') or '?'}), "
+              f"pixel size {ref_info['pixel_size_um'] or '?'} µm, {ref_info['shape'][1]} × {ref_info['shape'][0]} px, "
+              f"{ref_info['n_channels']} channel(s)", flush=True)
+        rows, n_bad = [], 0
+        for d in datasets:
+            try:
+                info = io_utils.acquisition_info(d["file"], d["scenes"][0])
+                issues = compare_acquisition(ref_info, info)
+            except Exception as e:
+                issues = [("warning", f"metadata could not be read: {type(e).__name__}: {e}")]
+            bad = [t for l, t in issues if l == "error"]
+            warn = [t for l, t in issues if l == "warning"]
+            n_bad += bool(bad)
+            mark = "✗" if bad else ("⚠" if warn else "✓")
+            print(f"  {mark} {d['file'].name}: " + ("; ".join(bad + warn) if (bad or warn) else "matches the reference"),
+                  flush=True)
+            for l, t in issues:
+                rows.append(dict(file=d["file"].name, level=l, message=t))
+            if not issues:
+                rows.append(dict(file=d["file"].name, level="ok", message="matches the reference"))
+        pd.DataFrame(rows).to_csv(out_dir / "reference_check.csv", index=False)
+        summary["metadata_check"] = dict(files_not_matching=n_bad, table=str(out_dir / "reference_check.csv"))
+        if n_bad and policy == "stop":
+            raise RunStopped(f"The reference image does not fit {n_bad} input file(s) (see above and "
+                             f"{out_dir / 'reference_check.csv'}). Use a matching reference, or set 'Check the "
+                             f"reference against the images' to 'warn'.")
+        if n_bad:
+            summary["errors"].append(f"reference image does not fit {n_bad} file(s) -- corrected anyway (check = warn)")
+
+    # ---- the corrections ----
+    try:
+        got = fields_from_reference_image(
+            ref, parse_int_list(cfg["background_channels"]), out_dir, kind=cfg["background_image_type"],
+            channel_map=parse_channel_map(cfg["background_image_channel_map"]),
+            scene_include=cfg["background_image_scenes"], dark_path=cfg["background_dark_path"] or None,
+            offset=cfg["background_offset"], downsample=cfg["background_downsample"],
+            z_projection=cfg["background_z_projection"], smooth_sigma=cfg["background_smooth_sigma"])
+    except Exception as e:
+        msg = f"Background from {ref.name} failed: {type(e).__name__}: {e}"
+        print("✗ " + msg + " -- continuing WITHOUT correction", flush=True)
+        summary["errors"].append(msg)
+        return result, summary
+    for d in datasets:
+        result[d["stem"]] = dict(got)
+    summary["fields"] = {str(k): v for k, v in got.items()}
+    return result, summary
 
 
 def stage_background(cfg, datasets):
@@ -169,6 +236,9 @@ def stage_background(cfg, datasets):
     summary = dict(mode=mode, fields={}, errors=[])
     if mode == "none":
         return result, summary
+
+    if mode == "image":
+        return _background_from_image(cfg, datasets, result, summary)
 
     if mode == "existing":
         paths = parse_channel_paths(cfg["existing_background_paths"])
@@ -241,7 +311,8 @@ def stage_overview(cfg, datasets):
     print(f"\n=== Overview pictures: {total} scene(s), {_n_workers(cfg)} workers ===", flush=True)
     counts, errors, done = dict(ok=0, skipped_exists=0, error=0), [], 0
     with ProcessPoolExecutor(max_workers=_n_workers(cfg)) as ex:
-        futs = {ex.submit(overview_scene, str(d["file"]), s, d["stem"], str(out), cfg): (d["stem"], s) for d, s, out in jobs}
+        futs = {ex.submit(overview_scene, str(d["file"]), s, d["stem"], str(out),
+                          {**cfg, "timepoint": d["timepoints"][0]}): (d["stem"], s) for d, s, out in jobs}
         for f in as_completed(futs):
             stem, scene = futs[f]
             done += 1
@@ -270,11 +341,13 @@ def stage_segmentation(cfg, datasets, backgrounds):
         dirs["seg"].mkdir(parents=True, exist_ok=True)
         bg = backgrounds.get(d["stem"], {}) if cfg["correct_in_segmentation"] else {}
         for s in d["scenes"]:
-            jobs.append((d, s, dirs, bg))
+            for t in (d["timepoints"] if d["series"] else [None]):
+                jobs.append((d, s, t, dirs, bg))
 
     total = len(jobs)
     use_nuclei = cfg["seed_source"] != "junctions"
-    print(f"\n=== Segmentation: {total} scene(s) in {len(datasets)} dataset(s), "
+    print(f"\n=== Segmentation: {total} {'image(s) (scenes × timepoints)' if any(d['series'] for d in datasets) else 'scene(s)'} "
+          f"in {len(datasets)} dataset(s), "
           f"{_n_workers(cfg)} workers ===", flush=True)
     print("Cells are found from " + ("the nuclei channel" if use_nuclei else
           "the junction channel alone (no nuclei channel)") + f"; size settings are in "
@@ -289,8 +362,8 @@ def stage_segmentation(cfg, datasets, backgrounds):
         futs = {ex.submit(segment_scene, str(d["file"]), s, d["stem"], str(dirs["seg"]),
                           str(dirs["qc"]) if cfg["save_qc_plot"] else None, params,
                           bg.get(cfg["nuclei_channel"]) if use_nuclei else None, bg.get(cfg["edge_channel"]),
-                          str(dirs["adj"]) if cfg["save_adjacency"] else None): d["stem"]
-                for d, s, dirs, bg in jobs}
+                          str(dirs["adj"]) if cfg["save_adjacency"] else None, t): d["stem"]
+                for d, s, t, dirs, bg in jobs}
         for f in as_completed(futs):
             stem = futs[f]
             try:
@@ -335,6 +408,51 @@ def stage_segmentation(cfg, datasets, backgrounds):
     return result
 
 
+def add_timepoints(cfg, datasets):
+    """Adds to every dataset: 'series' (bool), 'timepoints' (list) and 'frame_interval_min' (or None)."""
+    from .config import parse_timepoints
+    for d in datasets:
+        if cfg["time_mode"] != "series":
+            d.update(series=False, timepoints=[int(cfg["timepoint"])], frame_interval_min=None)
+            continue
+        n_t = io_utils.n_timepoints(d["file"], d["scenes"][0])
+        tps = parse_timepoints(cfg["timepoints"], n_t)
+        interval = cfg["frame_interval_min"] or io_utils.frame_interval_min(d["file"], d["scenes"][0])
+        d.update(series=True, timepoints=tps, frame_interval_min=interval)
+        if not tps:
+            print(f"⚠ {d['file'].name}: none of the timepoints '{cfg['timepoints']}' exists "
+                  f"(the file has {n_t}, numbered 0-{n_t - 1})", flush=True)
+        else:
+            iv = f", {interval:g} min apart" if interval else ", time between frames unknown"
+            rng = f"{tps[0]}-{tps[-1]}" if tps == list(range(tps[0], tps[-1] + 1)) else ", ".join(map(str, tps[:8])) + ("…" if len(tps) > 8 else "")
+            print(f"  • {d['file'].name}: {len(tps)} of {n_t} timepoint(s) ({rng}){iv}", flush=True)
+    return datasets
+
+
+def stage_tracking(cfg, datasets):
+    from .stages.tracking import track_dataset
+    todo = [d for d in datasets if d["series"] and d["timepoints"]]
+    print(f"\n=== Tracking: {sum(len(d['scenes']) for d in todo)} scene(s) over time, "
+          f"min. overlap {cfg['track_min_overlap']:g}, bridging up to {cfg['track_max_gap']} missing frame(s) ===",
+          flush=True)
+    out, errors = {}, []
+    for i, d in enumerate(todo, 1):
+        dirs = _dirs(cfg, d["stem"])
+        try:
+            tracks, summ = track_dataset(d["stem"], d["scenes"], d["timepoints"], dirs["seg"], dirs["track"],
+                                         cfg["track_min_overlap"], cfg["track_max_gap"], cfg["track_divisions"],
+                                         cfg["track_split_fraction"], cfg["save_tracked_labels"],
+                                         log=lambda m: print(m, flush=True))
+            out[d["stem"]] = dict(n_tracks=int(len(summ)),
+                                  n_whole_series=int(summ["whole_series"].sum()) if len(summ) else 0)
+        except Exception as e:
+            msg = f"tracking {d['stem']} failed: {type(e).__name__}: {e}"
+            print("✗ " + msg, flush=True)
+            errors.append(msg)
+        progress("tracking", i, len(todo))
+    return dict(datasets=out, errors=errors)
+
+
 def stage_measurement(cfg, datasets, backgrounds):
     from .stages.measurement import (measure_scene, meas_params_from_config, save_measurements,
                                          load_scene_info)
@@ -348,10 +466,11 @@ def stage_measurement(cfg, datasets, backgrounds):
             print(f"↷ Skipping measurement (exists): {csv}", flush=True)
             continue
         todo.append(d)
-        info = load_scene_info(dirs["seg"], d["stem"], dirs["adj"])
+        info = load_scene_info(dirs["seg"], d["stem"], dirs["adj"], series=d["series"])
         bg = backgrounds.get(d["stem"], {}) if cfg["correct_in_measurement"] else {}
         for s in d["scenes"]:
-            jobs.append((d, s, dirs, bg, info.get(s)))
+            for t in (d["timepoints"] if d["series"] else [None]):
+                jobs.append((d, s, t, dirs, bg, info.get((s, t) if d["series"] else s)))
 
     total = len(jobs)
     print(f"\n=== Measurement: {total} scene(s) in {len(todo)} dataset(s) ===", flush=True)
@@ -359,8 +478,9 @@ def stage_measurement(cfg, datasets, backgrounds):
     extras = {d["stem"]: {} for d in todo}
     errors, done = [], 0
     with ProcessPoolExecutor(max_workers=_n_workers(cfg)) as ex:
-        futs = {ex.submit(measure_scene, str(d["file"]), s, d["stem"], str(dirs["seg"]), params, bg, info):
-                (d["stem"], s) for d, s, dirs, bg, info in jobs}
+        futs = {ex.submit(measure_scene, str(d["file"]), s, d["stem"], str(dirs["seg"]), params, bg, info,
+                          t, d.get("frame_interval_min")):
+                (d["stem"], s if t is None else f"{s}|t{t}") for d, s, t, dirs, bg, info in jobs}
         for f in as_completed(futs):
             stem, s = futs[f]
             done += 1
@@ -377,8 +497,9 @@ def stage_measurement(cfg, datasets, backgrounds):
     n_cells = {}
     for d in todo:
         if rows[d["stem"]]:
+            track_dir = _dirs(cfg, d["stem"])["track"] if (d["series"] and cfg["track_cells"]) else None
             save_measurements(rows[d["stem"]], extras[d["stem"]], _dirs(cfg, d["stem"])["meas"],
-                              d["stem"], cfg["save_pickle"])
+                              d["stem"], cfg["save_pickle"], track_dir)
         else:
             print(f"⚠ No cells measured for {d['stem']}", flush=True)
         n_cells[d["stem"]] = len(rows[d["stem"]])
@@ -413,9 +534,13 @@ def run_pipeline(cfg):
         needs_images = (cfg["run_background"] or cfg["run_segmentation"] or cfg["run_measurement"]
                         or cfg["run_overview"])
         datasets = io_utils.resolve_jobs(cfg) if needs_images else []
+        if datasets and cfg["time_mode"] == "series":
+            print("Time-lapse: every selected timepoint is analysed as its own image", flush=True)
+        add_timepoints(cfg, datasets)
         log.data["inputs"] = [dict(file=str(d["file"]), dataset=d["stem"], format=d["format"],
                                    n_scenes_total=d["n_scenes_total"], n_scenes_used=len(d["scenes"]),
-                                   scenes=d["scenes"]) for d in datasets]
+                                   scenes=d["scenes"], timepoints=d["timepoints"] if d["series"] else None,
+                                   frame_interval_min=d["frame_interval_min"]) for d in datasets]
         log.save()
         n_sc = sum(len(d["scenes"]) for d in datasets)
         print(f"Found {len(datasets)} file(s) with {n_sc} scene(s) after filtering.", flush=True)
@@ -440,6 +565,9 @@ def run_pipeline(cfg):
 
             if cfg["run_segmentation"]:
                 log.data["stages"]["segmentation"] = stage_segmentation(cfg, datasets, backgrounds)
+                log.save()
+            if cfg["time_mode"] == "series" and cfg["track_cells"] and (cfg["run_segmentation"] or cfg["run_measurement"]):
+                log.data["stages"]["tracking"] = stage_tracking(cfg, datasets)
                 log.save()
             if cfg["run_measurement"]:
                 log.data["stages"]["measurement"] = stage_measurement(cfg, datasets, backgrounds)
@@ -468,6 +596,10 @@ def run_pipeline(cfg):
         status = "completed" if n_err == 0 else f"completed_with_{n_err}_errors"
         print(f"\nAll done ({status}). Outputs in {out_root}", flush=True)
         print(f"Analysis log: {log.base}.json", flush=True)
+    except RunStopped as e:
+        status = "stopped"
+        print(f"\n✗ Stopped: {e}", flush=True)
+        raise SystemExit(2)
     except KeyboardInterrupt:
         status = "cancelled"
         print("\n✗ Cancelled.", flush=True)
