@@ -69,7 +69,7 @@ from scipy import ndimage as ndi
 from skimage.filters import gaussian, threshold_otsu
 from skimage.morphology import remove_small_objects, remove_small_holes, disk
 from skimage.feature import peak_local_max
-from skimage.segmentation import watershed, mark_boundaries, clear_border
+from skimage.segmentation import watershed, mark_boundaries, clear_border, relabel_sequential
 
 import matplotlib
 matplotlib.use("Agg")
@@ -83,7 +83,7 @@ from ..io_utils import load_channel, n_z, scene_stem
 # segment_scene converts them per image with sizes.resolve_sizes.
 DEFAULT_SEG_PARAMS = dict(
     size_units="px", pixel_size_um=None, typical_nucleus_diameter_um=10.0, typical_cell_area_um2=1000.0,
-    seed_source="nuclei",
+    seed_source="nuclei", segment_objects="cells",
     nuclei_channel=0,
     edge_channel=1,
     seg_mode="mip",
@@ -594,6 +594,29 @@ def segment_cells_from_junctions(
     return cell_labels, n_cells, info
 
 
+def segment_nuclei_only(nuclei_img, p):
+    """Nuclei-only mode: no cell borders. The nuclei are the objects -- they are returned as
+    `nuclei_labels` (no `cell_labels`), after removing nuclei at the image border if that is on."""
+    diag = {}
+    nuclei_mask, nuclei_labels, n_raw = segment_nuclei(
+        nuclei_img, min_distance=p["min_distance"], nuclei_sigma=p["nuclei_sigma"],
+        min_nucleus_size=p["min_nucleus_size"], split_touching_nuclei=p["split_touching_nuclei"], diag=diag,
+    )
+    if p["clear_border_labels"]:
+        nuclei_labels = clear_border(nuclei_labels, buffer_size=p["clear_border_buffer"])
+    nuclei_labels, _, _ = relabel_sequential(nuclei_labels.astype(np.int32))
+    n = int(nuclei_labels.max())
+    out = dict(nuclei_mask=nuclei_mask, nuclei_labels=nuclei_labels, cell_labels=None, n_nuclei=n, n_cells=np.nan,
+               confluent=None, skipped=False, n_merged_pairs=0, merged_pairs=[], n_multinucleated=0, n_seeds=0,
+               adjacency=None, stats={"raw_object_areas": diag.get("raw_object_areas", np.zeros(0, np.int64))})
+    if nuclei_labels.ndim == 2:
+        try:
+            out["stats"].update(object_statistics(nuclei_labels, None))
+        except Exception as e:
+            print(f"⚠ size statistics failed: {e}", flush=True)
+    return out
+
+
 def marker_controlled_watershed(nuclei_img, edge_img, p):
     """
     Full segmentation of one 2D/3D image (pair). All sizes in `p` are in PIXELS.
@@ -604,6 +627,8 @@ def marker_controlled_watershed(nuclei_img, edge_img, p):
     stats = {"nuclei": DataFrame, "cells": DataFrame, "raw_object_areas": array} (2D only)
     """
     p = {**DEFAULT_SEG_PARAMS, **p}
+    if p["segment_objects"] == "nuclei_only":
+        return segment_nuclei_only(nuclei_img, p)
     if p["seed_source"] == "junctions":
         cell_labels, n_cells, info = segment_cells_from_junctions(
             edge_img, min_cells_confluent=p["min_nuclei_confluent"],
@@ -701,15 +726,17 @@ def segment_scene(file_str, scene, dataset_stem, seg_dir_str, qc_dir_str, p,
     nuclei_labels_path = seg_dir / f"{stem}_nuclei_labels.tif"
     nuclei_mask_path = seg_dir / f"{stem}_nuclei_mask.tif"
     qc_path = Path(qc_dir_str) / f"{stem}_qc.png" if qc_dir_str else None
-    use_nuclei = p["seed_source"] != "junctions"
+    nuc_only = p["segment_objects"] == "nuclei_only"
+    use_nuclei = nuc_only or p["seed_source"] != "junctions"
+    object_path = nuclei_labels_path if nuc_only else cell_path     # the label image measured later
 
     summary = dict(dataset=dataset_stem, file=Path(file_str).name, scene=scene, timepoint=t_load, scene_stem=stem,
                    seed_source=p["seed_source"], pixel_size_um=np.nan,
                    n_nuclei=np.nan, n_cells=np.nan, n_multinucleated=np.nan, confluent=None,
                    status="", message="", stats=None, adjacency=None, sizes_text=None, sizes_px=None)
 
-    if cell_path.exists() and not p["overwrite_segmentation"]:
-        summary.update(status="skipped_exists", message=f"↷ Skipped (exists): {cell_path.name}")
+    if object_path.exists() and not p["overwrite_segmentation"]:
+        summary.update(status="skipped_exists", message=f"↷ Skipped (exists): {object_path.name}")
         return summary
 
     try:
@@ -725,6 +752,9 @@ def segment_scene(file_str, scene, dataset_stem, seg_dir_str, qc_dir_str, p,
         ff_edge = load_correction(background_path_edge) if background_path_edge else None
 
         def load_pair(mode, z=None):
+            if nuc_only:
+                nuc = load_channel(file_str, scene, p["nuclei_channel"], mode, z, t_load)
+                return (correct_image(nuc, ff_nuc) if ff_nuc is not None else nuc), None
             edge = load_channel(file_str, scene, p["edge_channel"], mode, z, t_load)
             if ff_edge is not None:
                 edge = correct_image(edge, ff_edge)
@@ -753,7 +783,8 @@ def segment_scene(file_str, scene, dataset_stem, seg_dir_str, qc_dir_str, p,
             for z in range(n_z(file_str, scene)):
                 nuc, edge = load_pair("per_slice", z)
                 r = marker_controlled_watershed(nuc, edge, p)
-                clabs.append(np.where(r["cell_labels"] > 0, r["cell_labels"] + max_id, 0))
+                if not nuc_only:
+                    clabs.append(np.where(r["cell_labels"] > 0, r["cell_labels"] + max_id, 0))
                 if use_nuclei:
                     nlabs.append(np.where(r["nuclei_labels"] > 0, r["nuclei_labels"] + max_id, 0))
                     masks.append(r["nuclei_mask"])
@@ -761,26 +792,30 @@ def segment_scene(file_str, scene, dataset_stem, seg_dir_str, qc_dir_str, p,
                     n_nuclei += r["n_nuclei"]
                 else:
                     max_id += int(r["cell_labels"].max())
-                n_cells += r["n_cells"]
+                n_cells += 0 if nuc_only else r["n_cells"]
                 n_multi += r["n_multinucleated"]
                 n_seeds += r.get("n_seeds", 0)
                 n_merged += r["n_merged_pairs"]
                 confl.append(r["confluent"])
-            if len({l.shape for l in clabs}) > 1:
-                clabs = list(crop_to_common_shape(*clabs))
+            if len({l.shape for l in (clabs or nlabs)}) > 1:
+                if clabs:
+                    clabs = list(crop_to_common_shape(*clabs))
                 if use_nuclei:
                     masks, nlabs = (list(crop_to_common_shape(*x)) for x in (masks, nlabs))
-            cell_labels = np.stack(clabs)
+            cell_labels = np.stack(clabs) if clabs else None
             nuclei_mask, nuclei_labels = (np.stack(masks), np.stack(nlabs)) if use_nuclei else (None, None)
             if not use_nuclei:
                 n_nuclei = np.nan
-            confluent = all(confl)
+            confluent = None if nuc_only else all(confl)
+            if nuc_only:
+                n_cells = np.nan
             nuclei_img, edge_img = load_pair("mip")  # for QC display
         else:
             raise ValueError(f"Unknown seg_mode: {p['seg_mode']}")
 
         summary.update(n_nuclei=n_nuclei, n_cells=n_cells, n_multinucleated=n_multi, confluent=confluent)
-        if stats and cell_labels.ndim == 2:
+        objects = nuclei_labels if nuc_only else cell_labels
+        if stats and objects.ndim == 2:
             _add_metric_columns(stats, adjacency, ps)
             for t in (stats.get("nuclei"), stats.get("cells")):
                 if t is not None and len(t):
@@ -795,9 +830,13 @@ def segment_scene(file_str, scene, dataset_stem, seg_dir_str, qc_dir_str, p,
             return summary
 
         seg_dir.mkdir(parents=True, exist_ok=True)
-        max_label = int(max(cell_labels.max(), nuclei_labels.max() if use_nuclei else 0))
+        max_label = int(max(objects.max(), nuclei_labels.max() if use_nuclei else 0))
         dtype = np.uint16 if max_label < 65535 else np.uint32
-        tifffile.imwrite(cell_path, cell_labels.astype(dtype), compression="zlib")
+        if nuc_only:
+            if cell_path.exists():                     # from an earlier run with cells
+                cell_path.unlink()
+        else:
+            tifffile.imwrite(cell_path, cell_labels.astype(dtype), compression="zlib")
         if use_nuclei:
             tifffile.imwrite(nuclei_labels_path, nuclei_labels.astype(dtype), compression="zlib")
             if p["save_nuclei_mask"]:
@@ -808,7 +847,7 @@ def segment_scene(file_str, scene, dataset_stem, seg_dir_str, qc_dir_str, p,
                     stale.unlink()
 
         # ---- adjacency: which cells touch ----
-        if p["save_adjacency"] and adjacency is not None and cell_labels.ndim == 2:
+        if p["save_adjacency"] and adjacency is not None and objects.ndim == 2:
             adjacency.insert(0, "scene", scene)
             adjacency.insert(1, "timepoint", t_load)
             summary["adjacency"] = adjacency
@@ -820,7 +859,10 @@ def segment_scene(file_str, scene, dataset_stem, seg_dir_str, qc_dir_str, p,
 
         tag = "confluent" if confluent else ("non-confluent, masked" if p["nonconfluent_enabled"]
                                              else "non-confluent, unmasked")
-        if use_nuclei:
+        if nuc_only:
+            tag = "nuclei only"
+            msg = f"✓ Segmented {where}: {n_nuclei} nuclei (nuclei only, no cells)"
+        elif use_nuclei:
             msg = f"✓ Segmented {where}: {n_nuclei} nuclei, {n_cells} cells ({tag})"
             if n_multi:
                 msg += f", {n_multi} multi-nucleated"
@@ -830,7 +872,9 @@ def segment_scene(file_str, scene, dataset_stem, seg_dir_str, qc_dir_str, p,
 
         if p["save_qc_plot"] and qc_path is not None:
             qc_path.parent.mkdir(parents=True, exist_ok=True)
-            cl2d = cell_labels if cell_labels.ndim == 2 else cell_labels.max(axis=0)
+            cl2d = objects if objects.ndim == 2 else objects.max(axis=0)
+            if edge_img is None:                       # nuclei only: no junction channel to show
+                edge_img = np.zeros_like(nuclei_img, dtype=np.float32)
             if edge_img.ndim == 3:
                 edge_img = edge_img.max(axis=0)
                 nuclei_img = nuclei_img.max(axis=0) if nuclei_img is not None else None
@@ -840,7 +884,8 @@ def segment_scene(file_str, scene, dataset_stem, seg_dir_str, qc_dir_str, p,
                 a = None
                 b, c = crop_to_common_shape(edge_img, cl2d)
             _save_qc_plot(a, b, c, qc_path, title_extra=tag, dpi=p["qc_dpi"],
-                          merged_pairs=merged_pairs if cell_labels.ndim == 2 else None)
+                          merged_pairs=merged_pairs if objects.ndim == 2 else None,
+                          objects="nuclei" if nuc_only else "cells")
             msg += " + QC"
 
         summary.update(status="ok", message=msg)
@@ -851,7 +896,8 @@ def segment_scene(file_str, scene, dataset_stem, seg_dir_str, qc_dir_str, p,
         return summary
 
 
-def _save_qc_plot(nuclei_img, edge_img, cell_labels_2d, save_path, title_extra="", dpi=100, merged_pairs=None):
+def _save_qc_plot(nuclei_img, edge_img, cell_labels_2d, save_path, title_extra="", dpi=100, merged_pairs=None,
+                  objects="cells"):
     def norm(x):
         vmin, vmax = np.percentile(x, [0.5, 99.5])
         return np.clip((x - vmin) / (vmax - vmin + 1e-8), 0, 1)
@@ -870,8 +916,10 @@ def _save_qc_plot(nuclei_img, edge_img, cell_labels_2d, save_path, title_extra="
 
     fig, ax = plt.subplots(1, 3, figsize=(18, 6))
     ax[0].imshow(composite)
-    ax[0].set_title("Nuclei (white) / Edge marker (magenta)" if nuclei_img is not None else "Edge marker (no nuclei channel)")
-    ax[1].imshow(overlay); ax[1].set_title(f"Cell boundaries ({n} cells) {title_extra}")
+    ax[0].set_title("Nuclei" if objects == "nuclei" else
+                    ("Nuclei (white) / Edge marker (magenta)" if nuclei_img is not None else "Edge marker (no nuclei channel)"))
+    head = "Nucleus outlines" if objects == "nuclei" else "Cell boundaries"
+    ax[1].imshow(overlay); ax[1].set_title(f"{head} ({n} {objects}) {title_extra}")
     if merged_pairs:
         # cyan link between the nuclei of cells that were kept together (no junction between them)
         shown = 0
@@ -881,10 +929,10 @@ def _save_qc_plot(nuclei_img, edge_img, cell_labels_2d, save_path, title_extra="
             ax[1].plot([x0, x1], [y0, y1], color="cyan", lw=1.4, marker="o", ms=2.5)
             shown += 1
         if shown:
-            ax[1].set_title(f"Cell boundaries ({n} cells) {title_extra} · cyan = {shown} multi-nucleated")
+            ax[1].set_title(f"{head} ({n} {objects}) {title_extra} · cyan = {shown} multi-nucleated")
         ax[1].set_xlim(-0.5, cell_labels_2d.shape[1] - 0.5); ax[1].set_ylim(cell_labels_2d.shape[0] - 0.5, -0.5)
     ax[2].imshow(np.zeros_like(cell_labels_2d), cmap="gray", vmin=0, vmax=1)
-    ax[2].imshow(np.ma.masked_equal(cell_labels_2d, 0), cmap=lab_cmap, interpolation="nearest"); ax[2].set_title(f"Cell labels ({n} cells)")
+    ax[2].imshow(np.ma.masked_equal(cell_labels_2d, 0), cmap=lab_cmap, interpolation="nearest"); ax[2].set_title(f"{'Nucleus' if objects == 'nuclei' else 'Cell'} labels ({n} {objects})")
     for a in ax:
         a.axis("off")
     plt.tight_layout()

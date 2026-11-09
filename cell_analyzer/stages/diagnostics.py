@@ -277,7 +277,8 @@ def make_figure(t, cfg, title, save_path, dpi=120):
     u = Units(t, cfg)
     s = suggestions(t, u)
     f = u.fmt
-    fig, axes = plt.subplots(2, 4, figsize=(19, 8.6))
+    has_cells = len(cells) > 0          # nuclei-only mode: only the five nucleus panels
+    fig, axes = plt.subplots(2, 4, figsize=(19, 8.6)) if has_cells else plt.subplots(2, 3, figsize=(15, 8.6))
     ax = axes.ravel()
 
     def g(df, col):
@@ -308,7 +309,7 @@ def make_figure(t, cfg, title, save_path, dpi=120):
         _vline(ax[2], typ_d, "info", f"'Typical nucleus diameter' setting = {typ_d:g}", r)
 
     # 4 nearest neighbour
-    md = u.setting("multinuc_max_distance") if cfg.get("merge_multinucleated") else None
+    md = u.setting("multinuc_max_distance") if (cfg.get("merge_multinucleated") and has_cells) else None
     r = _hist(ax[3], g(nuc, NN), NUC, "Distance to the nearest nucleus\n(centre to centre)", f"distance ({u.L})",
               include=[mds, s["min_distance"], md])
     _vline(ax[3], _med(nuc, NN), "median", f"median = {_med(nuc, NN):.1f}", r)
@@ -321,45 +322,48 @@ def make_figure(t, cfg, title, save_path, dpi=120):
     r = _hist(ax[4], g(nuc, "eccentricity"), NUC, "Nucleus eccentricity\n(0 = round, 1 = elongated)", "eccentricity")
     _vline(ax[4], _med(nuc, "eccentricity"), "median", f"median = {_med(nuc, 'eccentricity'):.2f}", r)
 
-    # 6 cell area
-    typ_a = float(cfg.get("typical_cell_area_um2") or 1000.0) if u.um else None
-    r = _hist(ax[5], g(cells, A), CELL, "Cell area", f"area ({u.A})", include=[mls, s["min_label_size"], typ_a])
-    _vline(ax[5], _med(cells, A), "median", f"median = {f(_med(cells, A))}", r)
-    _vline(ax[5], mls, "current", f"current min. cell size = {f(mls)}{u.tag('min_label_size')}", r)
-    _vline(ax[5], s["min_label_size"], "suggested", f"suggested ≈ {f(s['min_label_size'])}  (median ÷ 3)", r)
-    if typ_a:
-        _vline(ax[5], typ_a, "info", f"'Typical cell area' setting = {typ_a:g}", r)
-
-    # 7 cell eccentricity
-    r = _hist(ax[6], g(cells, "eccentricity"), CELL, "Cell eccentricity\n(0 = round, 1 = elongated)", "eccentricity")
-    _vline(ax[6], _med(cells, "eccentricity"), "median", f"median = {_med(cells, 'eccentricity'):.2f}", r)
-
-    # 8 nuclei per cell
-    a = ax[7]
-    a.set_title("Nuclei per cell", loc="left", fontsize=10, color=INK)
-    a.spines[["top", "right"]].set_visible(False)
-    a.grid(axis="y", color=GRID, lw=0.8)
-    a.set_axisbelow(True)
-    a.tick_params(labelsize=8, colors=INK2)
-    nn = g(cells, "n_nuclei")
-    nn = nn[np.isfinite(nn.astype(float))] if len(nn) else nn
-    if len(nn):
-        ks = list(range(1, int(max(3, nn.max())) + 1))
-        counts = [int((nn == k).sum()) for k in ks]
-        bars = a.bar([str(k) for k in ks], counts, color=CELL, alpha=0.8, width=0.6)
-        for b, c in zip(bars, counts):
-            a.text(b.get_x() + b.get_width() / 2, b.get_height(), f"{c:,}\n{100 * c / len(nn):.1f} %",
-                   ha="center", va="bottom", fontsize=8, color=INK)
-        a.set_ylim(0, max(counts) * 1.25)
-        a.set_xlabel("nuclei in the cell", fontsize=8.5, color=INK2)
-        a.set_ylabel("cells", fontsize=8.5, color=INK2)
-        if not cfg.get("merge_multinucleated"):
-            a.text(0.98, 0.97, "'Keep multi-nucleated cells together' is off", transform=a.transAxes, ha="right",
-                   va="top", fontsize=7.5, color=INK2)
+    if not has_cells:
+        ax[5].axis("off")
     else:
-        a.text(0.5, 0.5, "no data", transform=a.transAxes, ha="center", va="center", color=INK2)
+        # 6 cell area
+        typ_a = float(cfg.get("typical_cell_area_um2") or 1000.0) if u.um else None
+        r = _hist(ax[5], g(cells, A), CELL, "Cell area", f"area ({u.A})", include=[mls, s["min_label_size"], typ_a])
+        _vline(ax[5], _med(cells, A), "median", f"median = {f(_med(cells, A))}", r)
+        _vline(ax[5], mls, "current", f"current min. cell size = {f(mls)}{u.tag('min_label_size')}", r)
+        _vline(ax[5], s["min_label_size"], "suggested", f"suggested ≈ {f(s['min_label_size'])}  (median ÷ 3)", r)
+        if typ_a:
+            _vline(ax[5], typ_a, "info", f"'Typical cell area' setting = {typ_a:g}", r)
 
-    for x in ax[:7]:
+        # 7 cell eccentricity
+        r = _hist(ax[6], g(cells, "eccentricity"), CELL, "Cell eccentricity\n(0 = round, 1 = elongated)", "eccentricity")
+        _vline(ax[6], _med(cells, "eccentricity"), "median", f"median = {_med(cells, 'eccentricity'):.2f}", r)
+
+        # 8 nuclei per cell
+        a = ax[7]
+        a.set_title("Nuclei per cell", loc="left", fontsize=10, color=INK)
+        a.spines[["top", "right"]].set_visible(False)
+        a.grid(axis="y", color=GRID, lw=0.8)
+        a.set_axisbelow(True)
+        a.tick_params(labelsize=8, colors=INK2)
+        nn = g(cells, "n_nuclei")
+        nn = nn[np.isfinite(nn.astype(float))] if len(nn) else nn
+        if len(nn):
+            ks = list(range(1, int(max(3, nn.max())) + 1))
+            counts = [int((nn == k).sum()) for k in ks]
+            bars = a.bar([str(k) for k in ks], counts, color=CELL, alpha=0.8, width=0.6)
+            for b, c in zip(bars, counts):
+                a.text(b.get_x() + b.get_width() / 2, b.get_height(), f"{c:,}\n{100 * c / len(nn):.1f} %",
+                       ha="center", va="bottom", fontsize=8, color=INK)
+            a.set_ylim(0, max(counts) * 1.25)
+            a.set_xlabel("nuclei in the cell", fontsize=8.5, color=INK2)
+            a.set_ylabel("cells", fontsize=8.5, color=INK2)
+            if not cfg.get("merge_multinucleated"):
+                a.text(0.98, 0.97, "'Keep multi-nucleated cells together' is off", transform=a.transAxes, ha="right",
+                       va="top", fontsize=7.5, color=INK2)
+        else:
+            a.text(0.5, 0.5, "no data", transform=a.transAxes, ha="center", va="center", color=INK2)
+
+    for x in ax[:7 if has_cells else 5]:
         if x.get_legend_handles_labels()[0]:
             x.legend(fontsize=7.5, frameon=True, facecolor="white", framealpha=0.85, edgecolor="none",
                      loc="upper left", handlelength=2.6, borderaxespad=0.2)
@@ -421,7 +425,8 @@ def run_size_statistics(cfg, dataset_stems=None):
     if len(allt["nuclei"]):
         print(f"    median nucleus area {u.fmt(_med(allt['nuclei'], u.col('area_px')))} {u.A}, diameter "
               f"{_med(allt['nuclei'], u.col('equivalent_diameter_px')):.1f} {u.L}")
-    print(f"    median cell area {u.fmt(_med(allt['cells'], u.col('area_px')))} {u.A}")
+    if len(allt["cells"]):
+        print(f"    median cell area {u.fmt(_med(allt['cells'], u.col('area_px')))} {u.A}")
     if u.um:
         d, a = sugg["typical_nucleus_diameter"], sugg["typical_cell_area"]
         if np.isfinite(d):

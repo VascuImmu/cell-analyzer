@@ -43,6 +43,7 @@ from .flatfield import load_correction, correct_image
 from ..io_utils import load_mip_stack, scene_stem, parse_well
 
 DEFAULT_MEAS_PARAMS = dict(
+    segment_objects="cells", nuc_ring_width_um=2.0, nuc_ring_gap_um=0.5,
     channel_names="",
     edge_channels="1, 3",
     boundary_band_px=1,
@@ -118,13 +119,17 @@ def measure_scene(file_str, scene, dataset_stem, seg_dir_str, p, background_path
     stem = scene_stem(dataset_stem, scene, timepoint)
     t_load = p["timepoint"] if timepoint is None else int(timepoint)
     where = scene if timepoint is None else f"{scene} t={t_load}"
-    cell_path = seg_dir / f"{stem}_cell_labels.tif"
+    nuc_only = p["segment_objects"] == "nuclei_only"
     nuclei_path = seg_dir / f"{stem}_nuclei_labels.tif"
+    cell_path = nuclei_path if nuc_only else seg_dir / f"{stem}_cell_labels.tif"
     scene_info = scene_info or {}
 
     if not cell_path.exists():
         why = " (skipped as non-confluent)" if scene_info.get("status") == "skipped_sparse" else ""
-        return [], {}, f"↷ No cell labels for {where}{why}"
+        return [], {}, f"↷ No {'nucleus' if nuc_only else 'cell'} labels for {where}{why}"
+    if nuc_only:
+        return _measure_nuclei_only(file_str, scene, dataset_stem, cell_path, p, background_paths, scene_info,
+                                    t_load, where, frame_interval_min)
 
     cell_labels = tifffile.imread(cell_path)
     if cell_labels.ndim != 2:
@@ -238,6 +243,98 @@ def measure_scene(file_str, scene, dataset_stem, seg_dir_str, p, background_path
         extras[lid] = cell_extra
 
     return rows, extras, f"✓ Measured {len(rows)} cells: {where}"
+
+
+def ring_labels(nuclei_labels, gap_px, width_px):
+    """A ring around every nucleus, `gap_px` away from it and `width_px` wide, carrying the nucleus' label.
+    Rings grow only into free space and stop where they meet the ring of a neighbouring nucleus."""
+    from skimage.segmentation import expand_labels
+    outer = expand_labels(nuclei_labels, distance=gap_px + width_px)
+    inner = expand_labels(nuclei_labels, distance=gap_px) if gap_px > 0 else nuclei_labels
+    return np.where(inner > 0, 0, outer)
+
+
+def _measure_nuclei_only(file_str, scene, dataset_stem, label_path, p, background_paths, scene_info,
+                         t_load, where, frame_interval_min):
+    """Nuclei-only mode: one row per nucleus -- shape, intensity of every channel inside the nucleus and in a
+    ring around it (cytoplasm next to the nucleus), nucleus ÷ ring ratio, distance to the nearest nucleus."""
+    from scipy.spatial import cKDTree
+    labels = tifffile.imread(label_path)
+    if labels.ndim != 2:
+        return [], {}, f"✗ {where}: labels are not 2D {labels.shape}; use segmentation mode 'mip'."
+    stack, pixel_size, file_ch_names = load_mip_stack(file_str, scene, t_load)
+    if p["pixel_size_um"]:
+        pixel_size = float(p["pixel_size_um"])
+    px = pixel_size if pixel_size else np.nan
+    n_channels = stack.shape[0]
+    names = _parse_names(p["channel_names"]) or file_ch_names
+    names = [str(n) for n in names][:n_channels] + [f"ch{i}" for i in range(len(names), n_channels)]
+    names = [n if names.count(n) == 1 else f"{n}_ch{i}" for i, n in enumerate(names)]
+    stack, labels = crop_last2_to_shape(stack, labels)
+    for ch, path in (background_paths or {}).items():
+        if path and int(ch) < n_channels:
+            stack[int(ch)] = correct_image(stack[int(ch)], load_correction(path))
+
+    well_row, well_col = parse_well(scene, Path(file_str).name, p["well_regex"], p["well_regex_fallback"])
+    well_id = f"{well_row}{well_col}" if well_row else None
+    to_px = (lambda um: um / pixel_size) if pixel_size else (lambda um: um)     # no pixel size: values are pixels
+    width = float(p["nuc_ring_width_um"] or 0)
+    ring = ring_labels(labels, to_px(float(p["nuc_ring_gap_um"] or 0)), to_px(width)) if width > 0 else None
+    ring_props = {q.label: q for q in regionprops(ring)} if ring is not None else {}
+
+    props = regionprops(labels)
+    nn = np.full(len(props), np.nan)
+    if len(props) > 1:
+        cen = np.array([q.centroid for q in props])
+        nn = cKDTree(cen).query(cen, k=2)[0][:, 1]
+
+    rows = []
+    for i, prop in enumerate(props):
+        lid = int(prop.label)
+        r0, c0, r1, c1 = prop.bbox
+        m = prop.image
+        row = {
+            "dataset": dataset_stem, "file": Path(file_str).name, "scene": scene,
+            "timepoint": t_load, "time_min": t_load * frame_interval_min if frame_interval_min else np.nan,
+            "well_row": well_row, "well_column": well_col, "well_id": well_id,
+            "scene_n_nuclei": scene_info.get("n_nuclei"),
+            "object": "nucleus",
+            "cell_id": lid,
+            "pixel_size_um": px,
+            "area_px": prop.area, "area_um2": prop.area * px ** 2,
+            "perimeter_px": prop.perimeter,
+            "eccentricity": prop.eccentricity,
+            "orientation_rad": prop.orientation, "orientation_deg": float(np.degrees(prop.orientation)),
+            "major_axis_length_px": prop.major_axis_length, "minor_axis_length_px": prop.minor_axis_length,
+            "major_axis_length_um": prop.major_axis_length * px, "minor_axis_length_um": prop.minor_axis_length * px,
+            "solidity": prop.solidity, "extent": prop.extent,
+            "equivalent_diameter_px": prop.equivalent_diameter,
+            "centroid_y": prop.centroid[0], "centroid_x": prop.centroid[1],
+            "nearest_nucleus_px": nn[i], "nearest_nucleus_um": nn[i] * px,
+        }
+        rq = ring_props.get(lid)
+        if ring is not None:
+            row["ring_area_px"] = rq.area if rq is not None else 0
+        for c in range(n_channels):
+            v = stack[c, r0:r1, c0:c1][m]
+            mean_v = float(v.mean())
+            row[f"mean_{names[c]}"] = mean_v
+            row[f"median_{names[c]}"] = float(np.median(v))
+            row[f"std_{names[c]}"] = float(v.std())
+            row[f"sum_{names[c]}"] = float(v.sum())
+            if ring is not None:
+                if rq is not None and rq.area:
+                    a0, b0, a1, b1 = rq.bbox
+                    rv = stack[c, a0:a1, b0:b1][rq.image]
+                    ring_mean = float(rv.mean())
+                    row[f"ring_mean_{names[c]}"] = ring_mean
+                    row[f"ring_median_{names[c]}"] = float(np.median(rv))
+                    row[f"nuc_ring_ratio_{names[c]}"] = mean_v / ring_mean if ring_mean > 0 else np.nan
+                else:
+                    row[f"ring_mean_{names[c]}"] = row[f"ring_median_{names[c]}"] = np.nan
+                    row[f"nuc_ring_ratio_{names[c]}"] = np.nan
+        rows.append(row)
+    return rows, {}, f"✓ Measured {len(rows)} nuclei: {where}"
 
 
 def save_measurements(rows, extras_by_scene, out_dir, dataset_stem, save_pickle=True, tracking_dir=None):

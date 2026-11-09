@@ -19,6 +19,8 @@ Outputs per dataset (folder per_file/<dataset>/tracking/):
                                 parent_track_id, iou_previous, frames_bridged
   <dataset>_track_summary.csv   one row per track: first/last timepoint, n_frames, parent, n_daughters
   <scene>_tracked_labels.tif    (optional) T x Y x X label movie, grey value = track_id
+
+In nuclei-only mode the nuclei are tracked (label files *_nuclei_labels.tif).
 """
 
 from pathlib import Path
@@ -150,7 +152,7 @@ def track_summary(tracks):
 
 
 def track_dataset(dataset_stem, scenes, timepoints, seg_dir, out_dir, min_iou=0.25, max_gap=1,
-                  divisions=True, split_fraction=0.5, save_labels=True, log=print):
+                  divisions=True, split_fraction=0.5, save_labels=True, log=print, label_suffix="cell_labels"):
     """Track every scene of one dataset from the label images on disk. Returns (tracks_df, summary_df)."""
     seg_dir, out_dir = Path(seg_dir), Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -158,7 +160,7 @@ def track_dataset(dataset_stem, scenes, timepoints, seg_dir, out_dir, min_iou=0.
     for scene in scenes:
         frames, shape = [], None
         for t in timepoints:
-            f = seg_dir / f"{scene_stem(dataset_stem, scene, t)}_cell_labels.tif"
+            f = seg_dir / f"{scene_stem(dataset_stem, scene, t)}_{label_suffix}.tif"
             lab = tifffile.imread(f) if f.exists() else None
             if lab is not None:
                 if lab.ndim != 2:

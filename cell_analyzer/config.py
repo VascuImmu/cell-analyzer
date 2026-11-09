@@ -28,7 +28,7 @@ from copy import deepcopy
 from pathlib import Path
 
 APP_NAME = "Cell Analyzer"
-PIPELINE_VERSION = "3.3"
+PIPELINE_VERSION = "3.4"
 
 # format key -> file extensions (lower case)
 SUPPORTED_FORMATS = {
@@ -150,14 +150,21 @@ PARAM_SCHEMA = [
     ]),
     # ------------------------------------------------------------------
     ("Channels", [
+        F("segment_objects", "cells", "choice", "What is segmented",
+          "cells = nuclei and whole cells (needs a junction / cell-border stain, or junctions only). "
+          "nuclei_only = NO cell-border stain: only the nuclei are found and measured, plus a thin ring "
+          "around each nucleus as a stand-in for the cytoplasm next to it (Measurement tab).",
+          ["cells", "nuclei_only"]),
         F("seed_source", "nuclei", "choice", "Cells are found from",
           "nuclei = a nuclear stain starts one cell per nucleus (best). "
           "junctions = NO nuclear stain: cells are found from the junction channel alone -- works for "
-          "confluent cells with (nearly) complete junctions.", ["nuclei", "junctions"]),
+          "confluent cells with (nearly) complete junctions.", ["nuclei", "junctions"],
+          enabled_if=("segment_objects", ["cells"])),
         F("nuclei_channel", 0, "int", "Nuclei channel index", "Channel used to seed the watershed (DNA/DAPI).",
           enabled_if=("seed_source", ["nuclei"])),
         F("edge_channel", 1, "int", "Edge/junction channel index",
-          "Channel used as the whole-cell watershed surface (e.g. VE-Cadherin)."),
+          "Channel used as the whole-cell watershed surface (e.g. VE-Cadherin).",
+          enabled_if=("segment_objects", ["cells"])),
         F("channel_names", "DNA, VE-Cadherin, ICAM1, PECAM1", "str_list", "Channel names",
           "Comma-separated, in channel order. Used for measurement column names. "
           "Blank = use names from the file metadata."),
@@ -291,7 +298,8 @@ PARAM_SCHEMA = [
         F("max_cell_area", None, "float_opt", "No nuclei: max. cell size after merging (area)",
           "Regions are never merged into something larger than this. Empty = automatic: 4 × cell area (4000 µm²).",
           enabled_if=("seed_source", ["junctions"])),
-        F("clear_border_labels", True, "bool", "Remove cells touching the image border"),
+        F("clear_border_labels", True, "bool", "Remove cells touching the image border",
+          "Also applies to the nuclei in nuclei-only mode."),
         F("clear_border_buffer", None, "float_opt", "Border buffer",
           "Empty = automatic: nucleus diameter ÷ 6 (1.7 µm).", enabled_if=("clear_border_labels", [True])),
         F("overwrite_segmentation", True, "bool", "Overwrite existing label images"),
@@ -341,7 +349,15 @@ PARAM_SCHEMA = [
         F("measure_nuclei", True, "bool", "Also measure nuclei (nuc_* columns)"),
         F("boundary_band_px", None, "float_opt", "Boundary ring width",
           "Width of the ring along the cell border in which junction intensity is measured. "
-          "Empty = automatic: nucleus diameter ÷ 60, at least 1 pixel."),
+          "Empty = automatic: nucleus diameter ÷ 60, at least 1 pixel.", enabled_if=("segment_objects", ["cells"])),
+        F("nuc_ring_width_um", 2.0, "float", "Nuclei only: ring around the nucleus (µm)",
+          "Width of a ring around each nucleus, measured as a stand-in for the cytoplasm right next to it "
+          "(columns ring_mean_<channel> and nuc_ring_ratio_<channel> = nucleus ÷ ring, e.g. for nuclear "
+          "translocation). Rings stop where they meet the ring of a neighbouring nucleus. 0 = no ring.",
+          enabled_if=("segment_objects", ["nuclei_only"])),
+        F("nuc_ring_gap_um", 0.5, "float", "Nuclei only: gap between nucleus and ring (µm)",
+          "Leaves out the blurred nucleus border, so that bright nuclear signal does not leak into the ring.",
+          enabled_if=("segment_objects", ["nuclei_only"]), advanced=True),
         F("ruggedness_smooth_frac", 0.02, "float", "Ruggedness smoothing (fraction of contour length)"),
         F("ruggedness_min_sigma", 1.5, "float", "Ruggedness min. smoothing sigma"),
         F("save_pickle", True, "bool", "Also save .pkl with per-cell boundary intensity arrays"),
@@ -610,6 +626,8 @@ def normalize_config(cfg):
     # backwards-compatible alias from the old code
     if out.get("edge_mode") in ("LoG", "log"):
         out["edge_mode"] = "gradient"
+    if out.get("segment_objects") == "nuclei_only":
+        out["seed_source"] = "nuclei"          # nuclei-only always starts from the nuclei channel
     if unknown:
         print(f"⚠ Ignoring unknown config keys: {unknown}")
     return out
@@ -659,7 +677,7 @@ def validate_config(cfg):
                     problems.append(f"Background file for channel {ch} not found: {p}")
         except ValueError as e:
             problems.append(str(e))
-    if cfg["seed_source"] == "nuclei" and cfg["nuclei_channel"] == cfg["edge_channel"]:
+    if cfg["segment_objects"] == "cells" and cfg["seed_source"] == "nuclei" and cfg["nuclei_channel"] == cfg["edge_channel"]:
         problems.append("Nuclei and edge channel are identical. (No nuclear stain? Set 'Cells are found from' "
                         "to 'junctions' on the Stages & Channels tab.)")
     for key in ("typical_nucleus_diameter_um", "typical_cell_area_um2"):

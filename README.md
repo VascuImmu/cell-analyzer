@@ -1,4 +1,4 @@
-# Cell Analyzer (v3.3)
+# Cell Analyzer (v3.4)
 
 Cell Analyzer segments nuclei and cells in microscopy images (`.lif`, `.czi`, `.ome.tif`/`.tif`, `.nd2`) and measures every cell. It then combines the results of all files and makes plots and statistics per condition. All of this runs from one window.
 
@@ -133,6 +133,7 @@ python -m cell_analyzer.stages.analysis results/aggregated_cell_measurements.csv
 2. **Segmentation.**
    - Size settings are in µm / µm². Settings left empty are derived from the typical nucleus diameter (10 µm) and the typical cell area (1000 µm²) and converted to pixels with each image's pixel size (`sizes.py`). The values used are printed in the Run log and saved in `segmentation_summary.csv` (`used_*_px`).
    - With a nuclei channel: Otsu thresholding, distance transform, and a watershed that splits touching nuclei. Cells are then grown from the nuclei over the smoothed junction image.
+   - Without a cell-border stain (`segment_objects = nuclei_only`): only the nuclei are segmented (same nuclei settings, nuclei touching the image border removed) and saved as `*_nuclei_labels.tif`; no cells, confluence check or adjacency.
    - Without a nuclei channel (`seed_source = junctions`): the junction image is blurred, its dark basins (h-minima) seed the watershed, and neighbouring regions are merged when the boundary between them carries no junction signal. This needs confluent cells with nearly complete junctions.
    - Cells with two nuclei are kept together. Two neighbouring cells are merged when their nuclei are close and the boundary between them has no junction signal, compared with a typical boundary in the same image. Merged cells are marked in cyan in the QC pictures.
    - Adjacency: every pair of cells that share a boundary (4-connected contact of the labels, not centroid distance), with contact length and mean junction intensity.
@@ -146,6 +147,7 @@ python -m cell_analyzer.stages.analysis results/aggregated_cell_measurements.csv
    - Intensity in a ring along the cell boundary, for the junction channels.
    - `n_nuclei`, the number of nuclei in the cell; `n_neighbours` and `neighbour_contact_um` from the adjacency.
    - Well ID, read from the scene or file name with a regex you can change.
+   - Nuclei-only mode: one row per nucleus (`object = nucleus`, `cell_id` = nucleus number): shape, every channel inside the nucleus (`mean_<ch>`, …), in a ring around it (`ring_mean_<ch>`, `ring_median_<ch>`; default 2 µm wide, 0.5 µm away from the nucleus, rings stop where they meet a neighbour's ring), `nuc_ring_ratio_<ch>` = nucleus ÷ ring (e.g. nuclear translocation), and `nearest_nucleus_um`. In sparse cultures the ring can include empty background.
    - Time series: `timepoint`, `time_min` (frame interval from the file metadata or the setting), `track_id`, `parent_track_id`, `track_n_frames`.
 4. **Aggregation.**
    - Combines the tables of all files and keeps only the latest rescan of each plate.
@@ -180,6 +182,10 @@ speed = (m.sort_values("timepoint").groupby(["source_dataset", "scene", "track_i
 ```
 
 `tracking/<scene>_tracked_labels.tif` is a T × Y × X label movie whose grey values are the track IDs (Fiji: *Image › Lookup Tables › glasbey*). Track IDs are unique within a scene.
+
+## Changes in 3.4
+
+- **Nuclei only** (`segment_objects = nuclei_only`, Stages & Channels tab) for images without a cell-border stain: nuclei are segmented, measured and (time series) tracked; a ring around each nucleus stands in for the adjacent cytoplasm (`ring_mean_<ch>`, `nuc_ring_ratio_<ch>`). Size statistics show the nucleus panels only.
 
 ## Changes in 3.3
 

@@ -349,8 +349,10 @@ def stage_segmentation(cfg, datasets, backgrounds):
     print(f"\n=== Segmentation: {total} {'image(s) (scenes × timepoints)' if any(d['series'] for d in datasets) else 'scene(s)'} "
           f"in {len(datasets)} dataset(s), "
           f"{_n_workers(cfg)} workers ===", flush=True)
-    print("Cells are found from " + ("the nuclei channel" if use_nuclei else
-          "the junction channel alone (no nuclei channel)") + f"; size settings are in "
+    what = ("Only nuclei are segmented (no cell borders)" if cfg["segment_objects"] == "nuclei_only" else
+            "Cells are found from " + ("the nuclei channel" if use_nuclei else
+                                       "the junction channel alone (no nuclei channel)"))
+    print(what + f"; size settings are in "
           f"{'µm' if cfg['size_units'] == 'um' else 'pixels'}, empty ones are derived from a "
           f"{cfg['typical_nucleus_diameter_um']:g} µm nucleus and a {cfg['typical_cell_area_um2']:g} µm² cell.", flush=True)
     sizes_shown, sizes_used = set(), {}
@@ -442,7 +444,9 @@ def stage_tracking(cfg, datasets):
             tracks, summ = track_dataset(d["stem"], d["scenes"], d["timepoints"], dirs["seg"], dirs["track"],
                                          cfg["track_min_overlap"], cfg["track_max_gap"], cfg["track_divisions"],
                                          cfg["track_split_fraction"], cfg["save_tracked_labels"],
-                                         log=lambda m: print(m, flush=True))
+                                         log=lambda m: print(m, flush=True),
+                                         label_suffix="nuclei_labels" if cfg["segment_objects"] == "nuclei_only"
+                                         else "cell_labels")
             out[d["stem"]] = dict(n_tracks=int(len(summ)),
                                   n_whole_series=int(summ["whole_series"].sum()) if len(summ) else 0)
         except Exception as e:
